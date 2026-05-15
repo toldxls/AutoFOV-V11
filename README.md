@@ -1,16 +1,16 @@
 # AutoFOV V11 (WiFi & BLE Edition)
 
-AutoFOV is a specialized microscopy field-of-view (FOV) calculator, automated focus stacking assistant, and wireless camera trigger. Powered by an ESP32-S3, it uses a Time-of-Flight (ToF) sensor to measure subject distance and calculates the real-time FOV based on a calibrated linear regression model. 
+AutoFOV is a specialized photomicroscopy field-of-view (FOV) calculator, automated focus stacking assistant, with wireless camera trigger. Powered by an ESP32-S3, it uses a Time-of-Flight (ToF) sensor to measure bellows distance and calculates a real-time FOV based on a calibrated linear regression model. 
 
-This version (V11 patched3) introduces concurrent Bluetooth Low Energy (BLE) HID triggering and a high-speed WiFi WebSocket server for remote telemetry and control.
+This version (V11) introduces concurrent Bluetooth Low Energy (BLE) HID connectivity and notifications, and a high-speed WiFi WebSocket server for live remote telemetry and control.
 
 ## Features
 
 * **Real-Time FOV Calculation:** Uses a VL53L4CX ToF sensor to measure distance and computes FOV for 5x, 10x, and 20x objectives.
-* **Custom Calibration:** Calibrate the device to your specific optical setup using a physical demarcation standard. Calculates standard error (RMSE) and R² of the calibration fit.
-* **Stack Calculator:** Automatically calculates step size, total depth, and required images for focus stacking based on objective numerical aperture (NA) and depth of field (DOF).
-* **BLE Camera Triggering:** Acts as a BLE HID Keyboard. Sends an F12 keystroke to your connected PC or camera rig when the hardware trigger is activated.
-* **Web Dashboard & Telemetry:** Connects to your local WiFi to provide a high-speed (~30Hz) WebSocket telemetry stream (distance, FOV, signal rate) and remote control over settings.
+* **Custom Calibration:** Calibrate the device to your specific optical setup using a scaled micrometer. Calculates standard error (RMSE) and R² of the calibration fit.
+* **Stack Calculator:** Automatically calculates image overlap % and total depth from step size, and required image # based on objective numerical aperture (NA) and depth of field (DOF).
+* **BLE Camera Triggering:** Acts as a BLE HID Keyboard. Sends an F12 keystroke to your connected device after the stack finishes.
+* **Web Dashboard & Telemetry:** Connects to WiFi to provide a high-speed (~30Hz) data stream (distance, AVG FOV, TOF signal rate) and remote control of buttons and screen settings.
 * **Captive Portal Setup:** First-time WiFi setup is handled via a built-in access point (AutoFOV-Setup).
 * **PSRAM-Backed UI:** Fluid, flicker-free UI utilizing off-screen 16-bit sprites buffered in PSRAM.
 * **Customization:** Adjustable screen brightness, sleep timeouts, and multiple color themes (Classic, Midnight, Forest, Daylight) with adjustable tint.
@@ -21,7 +21,7 @@ This version (V11 patched3) introduces concurrent Bluetooth Low Energy (BLE) HID
 * **Display:** 2.8" ILI9341 TFT SPI Display
 * **Touch Controller:** FT6206 Capacitive Touch (I2C)
 * **Sensor:** VL53L4CX Time-of-Flight Sensor (I2C)
-* **Trigger Interface:** Optocoupler or physical switch
+* **Trigger Interface:** Optocoupler to sense your stepper controller's shutter release
 
 ### Pin Configuration
 
@@ -51,17 +51,17 @@ Install the following libraries via the Arduino Library Manager or manually:
 ## Installation & Flashing
 
 ### 1. Arduino IDE Setup
-Because this firmware heavily relies on PSRAM for UI buffering and features concurrent radio usage, strict build settings are required. Configure your board settings as follows:
+Because this firmware relies heavily on PSRAM for UI buffering and features concurrent BLE/wifi radio usage, strict settings are required. Configure your board settings as follows:
 * **Board:** ESP32S3 Dev Module
 * **PSRAM:** QSPI PSRAM 
-* **Partition Scheme:** Huge APP 
+* **Partition Scheme:** Huge APP 3MB no OTA
 * **Events Run On:** Core 1
 * **Arduino Runs On:** Core 1
 
 ### 2. Upload the Web Interface (LittleFS)
 The web interface HTML is required for the WiFi dashboard to load.
-1. Create a `data` folder in the same directory as your `.ino` files.
-2. Place your `index.html` file inside the `data` folder.
+1. Requires a `data` folder in the same directory as the `.ino` files.
+2. Place the `index.html` file inside the `data` folder.
 3. Use the Arduino ESP32 LittleFS Data Upload Tool to flash the contents of the `data` folder to the ESP32.
 
 ### 3. Flash the Firmware
@@ -72,19 +72,19 @@ Compile and upload the combined sketch (`AutoFOV_V11_patched3.ino` and `AutoFOV_
 ### WiFi & Web Interface
 1. **Initial Boot:** If no WiFi credentials are saved, the device will boot into Captive Portal mode.
 2. **Connect to AP:** Connect your phone or PC to the WiFi network `AutoFOV-Setup`.
-3. **Configure:** A setup page will pop up automatically. Enter your home WiFi credentials. The device will save these, restart, and connect to your local network.
-4. **Access Dashboard:** The device's assigned IP address will appear on the TFT screen (under the WIFI INFO menu, accessed by tapping the WiFi icon). Enter this IP into any web browser to access the remote dashboard.
+3. **Configure:** A setup page will pop up automatically. Enter your credentials. The device will save these, restart, and connect to your local network (use a very high IP like 192.168.1.250).
+4. **Access Dashboard:** The device's assigned IP address will appear on the TFT screen (under the WIFI INFO menu, accessed by tapping the WiFi icon). Enter this IP into any browser to access the remote controller. 
 
 ### BLE Trigger Setup
 1. Turn on the device and wait for WiFi to connect. BLE initialization is deferred until WiFi stabilizes to preserve heap memory.
 2. Go to the Bluetooth settings on your PC or camera control device.
 3. Look for **ESP_Cam** and pair with it.
-4. When the hardware trigger (Pin A4) is pulled LOW, the ESP32 will send an F12 keystroke over Bluetooth.
+4. When the hardware trigger (Pin A4) stops being pulled LOW after 10s, the ESP32 will send an F12 keystroke over Bluetooth.
 
 ### Calibration
 If you change optics or sensors, run the built-in calibration:
 1. Tap **CALIBRATE** on the main screen.
-2. Set your photo width (pixels) and demarcation distance (mm).
+2. Set your photo width (in pixels) and demarcation distance used to measure # of pixels between marks (0.4 mm default).
 3. Follow the on-screen prompts to capture multiple points (3 to 20) at varying distances.
-4. The device will calculate a linear regression, saving the slope, intercept, and R² to non-volatile memory.
+4. The device will calculate a linear regression, saving the slope, intercept, R², and other metrics to non-volatile memory.
 # AutoFOV V11 Patched 3
