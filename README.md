@@ -1,6 +1,6 @@
 # AutoFOV V11 (WiFi & BLE Edition)
 
-AutoFOV is a specialized photomicroscopy field-of-view (FOV) calculator, automated focus stacking assistant, with wireless camera trigger. Powered by an ESP32-S3, it uses a Time-of-Flight (ToF) sensor to measure bellows distance and calculates a real-time FOV based on a calibrated linear regression model. 
+AutoFOV is a specialized photomicroscopy field-of-view (FOV) calculator and automated focus stacking assistant with wireless camera trigger. Powered by an ESP32-S3, it uses a Time-of-Flight (ToF) sensor to measure bellows separation distance and calculates a real-time FOV based on a calibrated linear regression model for any bellows/magnification. 
 
 This version (V11) introduces concurrent Bluetooth Low Energy (BLE) HID connectivity and notifications, and a high-speed WiFi WebSocket server for live remote telemetry and control.
 
