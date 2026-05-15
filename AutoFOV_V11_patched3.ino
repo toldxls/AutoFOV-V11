@@ -2648,7 +2648,7 @@ void loop() {
   wifiLoop();
 
   // Retry a pending BLE HID trigger that couldn't fire at stack-complete time
-  // because BLE was momentarily disconnected.  Clears after send or after 30 s.
+  // because BLE was momentarily disconnected.  Clears after send or after 60 s.
   if (btTriggerPending && !isSequenceActive) {
     NimBLEServer* pBleRetry = NimBLEDevice::getServer();
     if (pBleRetry != nullptr && pBleRetry->getConnectedCount() > 0) {

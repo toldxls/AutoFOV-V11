@@ -1851,6 +1851,9 @@
     let wifiBase = '';
     let wifiIP = '';
     let reconnectAttempts = 0;
+    // Single shared AudioContext for the stack-complete beep. Reused across
+    // every stack so we never exhaust the browser's concurrent-context cap.
+    let beepCtx = null;
     let reconnectTimer = null;
 
     // Packet-rate tracking
@@ -2097,12 +2100,14 @@
             // Audible cue: 3 beeps (300 ms each, 450 ms apart) scheduled via
             // AudioContext so they play precisely without blocking the main thread.
             try {
-                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                if (!beepCtx) beepCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (beepCtx.state === 'suspended') beepCtx.resume();
+                const now = beepCtx.currentTime;
                 for (let i = 0; i < 3; i++) {
-                    const o = ctx.createOscillator(), g = ctx.createGain();
-                    o.connect(g); g.connect(ctx.destination);
+                    const o = beepCtx.createOscillator(), g = beepCtx.createGain();
+                    o.connect(g); g.connect(beepCtx.destination);
                     o.frequency.value = 880; g.gain.value = 0.15;
-                    const t = ctx.currentTime + i * 0.45;
+                    const t = now + i * 0.45;
                     o.start(t); o.stop(t + 0.30);
                 }
             } catch {}

@@ -79,7 +79,19 @@ Compile and upload the combined sketch (`AutoFOV_V11_patched3.ino` and `AutoFOV_
 1. Turn on the device and wait for WiFi to connect. BLE initialization is deferred until WiFi stabilizes to preserve heap memory.
 2. Go to the Bluetooth settings on your PC or camera control device.
 3. Look for **ESP_Cam** and pair with it.
-4. When the hardware trigger (Pin A4) stops being pulled LOW after 10s, the ESP32 will send an F12 keystroke over Bluetooth.
+4. When the hardware trigger (Pin A4) stops being pulled LOW, the ESP32 will send an F12 keystroke over Bluetooth (see thresholds below).
+
+### Stack-Complete Thresholds
+
+Three constants govern the whole trigger sequence (`AutoFOV_V11_patched3.ino:598-599` and the trigger watcher):
+
+| Limit | Value | Role |
+| :--- | :--- | :--- |
+| Pulse debounce | 15 ms | A4 must read LOW continuously for >15 ms to count as one real trigger pulse (rejects noise/glitches). |
+| `MIN_ACTIVE_DURATION` | 20 s (20000) | The stack must have been active at least this long — measured first pulse → last pulse — or nothing fires. |
+| `SILENCE_DURATION` | 5 s (5000) | After the last detected A4 pulse, this much silence must pass before the stack is declared "complete." |
+
+When the stack is declared complete, the device sends the BLE F12 keystroke and a browser notification (3-beep audible cue) to any connected web dashboard. A run shorter than `MIN_ACTIVE_DURATION` is treated as a false start and is silently ignored. If your camera's interval between shots exceeds `SILENCE_DURATION`, raise that constant or the stack will falsely complete mid-run.
 
 ### Calibration
 If you change optics or sensors, run the built-in calibration:
