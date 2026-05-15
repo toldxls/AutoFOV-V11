@@ -87,4 +87,4 @@ If you change optics or sensors, run the built-in calibration:
 2. Set your photo width (in pixels) and demarcation distance used to measure # of pixels between marks (0.4 mm default).
 3. Follow the on-screen prompts to capture multiple points (3 to 20) at varying distances.
 4. The device will calculate a linear regression, saving the slope, intercept, R², and other metrics to non-volatile memory.
-# AutoFOV V11 Patched 3
+
