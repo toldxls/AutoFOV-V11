@@ -464,7 +464,7 @@ Button btnGraphBack(205, 2, 33, 33, "X", 0x4208, COLOR_RED, 2, true);  // X clos
 // so the "TRIGGER LED" label and ON/OFF toggle remain visually aligned and
 // centered with the slider beneath them.
 Button btnBrightBack(60, 274, 120, 40, "GO BACK", TFT_BLACK, TFT_WHITE, 1, true);
-Button btnLedToggle(155, 148, 75, 26, "ON", COLOR_PUREGREEN, TFT_WHITE, 1, true);
+Button btnLedToggle(155, 148, 75, 26, "OFF", COLOR_MAROON, TFT_WHITE, 1, true);
 Button btnScreenTimeouts(20, 226, 200, 32, "SCREEN TIMEOUTS", COLOR_TEAL, TFT_WHITE, 1, true);
 // Brightness screen: which slider is selected: 0=screen, 1=LED
 int brightnessSelection = 0;
@@ -523,7 +523,7 @@ CalibData settings;
 
 // V17: Magic bumped because CalibData layout grew (calibR2 added).
 // Devices upgrading from V16 will see a one-time return to defaults.
-#define CALIB_MAGIC 0x544F4C4A  // V18: bumped to reset ledEnabled default to OFF
+#define CALIB_MAGIC 0x544F4C4B  // V19: bumped to reset ledEnabled default to ON
 
 bool isCustomCalib = false;
 int currentBrightness = Config::DEFAULT_BRIGHTNESS;
@@ -609,6 +609,16 @@ bool isSequenceActive = false;
 bool shutterActive = false;
 unsigned long firstPulseTime = 0;
 unsigned long lastPulseTime = 0;
+
+// BLE trigger retry: if BLE was not connected at stack-complete time, the
+// press/release report is queued here and replayed as soon as BLE reconnects
+// (or abandoned after 60 s).
+bool btTriggerPending = false;
+unsigned long btTriggerPendingMs = 0;
+
+// BLE keep-alive: null HID report sent every 5 s while a stack is active so
+// iOS/Android don't drop the idle HID connection before stack complete fires.
+unsigned long lastBLEKeepAliveMs = 0;
 
 bool lastBTState = false;
 bool forceBTRedraw = true;
@@ -2468,7 +2478,7 @@ void setup() {
     settings.stackTotalDepth = (float)stackTotalImgs;
     settings.stackTimePerStep = stackTimePerStep;
     settings.isCustom = 0;
-    settings.ledEnabled = 0;
+    settings.ledEnabled = 1;
     settings.ledDuty = TRIGGER_LED_DUTY;
     settings._pad = 0;
     settings.calibR2 = 0.994f;
@@ -2637,6 +2647,21 @@ void loop() {
   // patched3: drain WiFi command queue + push telemetry (non-blocking)
   wifiLoop();
 
+  // Retry a pending BLE HID trigger that couldn't fire at stack-complete time
+  // because BLE was momentarily disconnected.  Clears after send or after 30 s.
+  if (btTriggerPending && !isSequenceActive) {
+    NimBLEServer* pBleRetry = NimBLEDevice::getServer();
+    if (pBleRetry != nullptr && pBleRetry->getConnectedCount() > 0) {
+      uint8_t press[8]   = {0x00, 0x00, HID_KEY_TRIGGER, 0x00, 0x00, 0x00, 0x00, 0x00};
+      uint8_t release[8] = {0x00, 0x00, 0x00,            0x00, 0x00, 0x00, 0x00, 0x00};
+      keyboardInput->setValue(press, 8);   keyboardInput->notify(); delay(50);
+      keyboardInput->setValue(release, 8); keyboardInput->notify();
+      btTriggerPending = false;
+    } else if ((unsigned long)(millis() - btTriggerPendingMs) > 60000) {
+      btTriggerPending = false;
+    }
+  }
+
   if (currentMode != CAL_SAMPLING) {
     unsigned long idle = millis() - lastActivityTime;
     if (!isScreenSleep && idle > sleepTimeoutMs) {
@@ -2731,19 +2756,39 @@ void loop() {
     if (!isSequenceActive) {
       isSequenceActive = true;
       firstPulseTime = pulseTime;
+      btTriggerPending = false;  // new stack cancels any stale pending retry
+      lastBLEKeepAliveMs = pulseTime;
     }
     lastPulseTime = pulseTime;
     registerActivity();
   }
 
+  // Send a null HID report every 5 s during an active stack so the phone's
+  // BLE host doesn't drop the idle HID connection before stack complete fires.
+  if (isSequenceActive && keyboardInput != nullptr) {
+    NimBLEServer* pKA = NimBLEDevice::getServer();
+    if (pKA != nullptr && pKA->getConnectedCount() > 0 &&
+        (unsigned long)(millis() - lastBLEKeepAliveMs) >= 5000) {
+      uint8_t nullReport[8] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+      keyboardInput->setValue(nullReport, 8);
+      keyboardInput->notify();
+      lastBLEKeepAliveMs = millis();
+    }
+  }
+
   if (isSequenceActive && ((unsigned long)(millis() - lastPulseTime) >= SILENCE_DURATION)) {
     unsigned long totalActiveTime = (unsigned long)(lastPulseTime - firstPulseTime);
     if (totalActiveTime >= MIN_ACTIVE_DURATION) {
-      if(NimBLEDevice::getServer() != nullptr && NimBLEDevice::getServer()->getConnectedCount() > 0) {
+      NimBLEServer* pBleServer = NimBLEDevice::getServer();
+      if (pBleServer != nullptr && pBleServer->getConnectedCount() > 0) {
         uint8_t press[8]   = {0x00, 0x00, HID_KEY_TRIGGER, 0x00, 0x00, 0x00, 0x00, 0x00};
         uint8_t release[8] = {0x00, 0x00, 0x00,            0x00, 0x00, 0x00, 0x00, 0x00};
         keyboardInput->setValue(press, 8);   keyboardInput->notify(); delay(50);
         keyboardInput->setValue(release, 8); keyboardInput->notify();
+      } else {
+        // BLE dropped during the stack — retry once it reconnects (within 30 s)
+        btTriggerPending = true;
+        btTriggerPendingMs = millis();
       }
       // WiFi-side notification — fires regardless of BLE state so the stacker
       // app on a phone (or any open browser tab) gets a system notification

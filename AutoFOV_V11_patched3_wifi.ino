@@ -1201,6 +1201,7 @@ String wifiGetSSID()     { if (wifiServerMode == WMODE_PORTAL) return String(AP_
 // Called from main.ino when a stack sequence finishes (the same moment the
 // BLE HID key would have fired).  Pushes a one-shot WS event so the web UI
 // can fire a browser Notification — BLE-free fallback for the stacker prompt.
+// The JS side plays 3 scheduled AudioContext beeps from this single message.
 void wifiNotifyStackComplete() {
     if (wsServer.count() == 0) return;
     wsServer.textAll("{\"stackDone\":1}");

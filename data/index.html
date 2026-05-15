@@ -731,8 +731,8 @@
                 <div class="gfx-text" style="left: 15px; top: 150px; color: var(--text-disabled); font-size: 11px;">LED</div>
                 <div id="bright-led-pct" class="gfx-text" style="left: 80px; top: 150px; color: var(--accent-magenta); font-size: 11px;">25%</div>
                 <div id="btn-led-toggle" class="gfx-btn"
-                     style="left: 155px; top: 148px; width: 75px; height: 26px; background: #00FF00; font-size: 12px;"
-                     onclick="toggleLed()">ON</div>
+                     style="left: 155px; top: 148px; width: 75px; height: 26px; background: #780000; font-size: 12px;"
+                     onclick="toggleLed()">OFF</div>
 
                 <!-- LED slider -->
                 <div class="slider-track" style="top: 184px;" id="led-slider" onmousedown="startSlider(event,'led')" ontouchstart="startSlider(event,'led')">
@@ -2094,13 +2094,17 @@
             if ('Notification' in window && Notification.permission === 'granted') {
                 try { new Notification('AutoFOV', { body: 'Stack complete', tag: 'stack-done' }); } catch {}
             }
-            // Audible cue for desktop users with notifications disabled.
+            // Audible cue: 3 beeps (300 ms each, 450 ms apart) scheduled via
+            // AudioContext so they play precisely without blocking the main thread.
             try {
                 const ctx = new (window.AudioContext || window.webkitAudioContext)();
-                const o = ctx.createOscillator(), g = ctx.createGain();
-                o.connect(g); g.connect(ctx.destination);
-                o.frequency.value = 880; g.gain.value = 0.15;
-                o.start(); o.stop(ctx.currentTime + 0.18);
+                for (let i = 0; i < 3; i++) {
+                    const o = ctx.createOscillator(), g = ctx.createGain();
+                    o.connect(g); g.connect(ctx.destination);
+                    o.frequency.value = 880; g.gain.value = 0.15;
+                    const t = ctx.currentTime + i * 0.45;
+                    o.start(t); o.stop(t + 0.30);
+                }
             } catch {}
         }
 
