@@ -1,0 +1,2242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto FOV Web Control</title>
+    <style>
+        /* RGB565 → CSS color reference (converted from firmware constants):
+           COLOR_LIGHTGREY  0xC618 → #C0C0C0
+           COLOR_DARKGREY   0x7BEF → #787878
+           COLOR_GREENYELLOW 0xAFE5 → #ADFF2F
+           COLOR_PUREGREEN  0x07E0 → #00FF00
+           COLOR_DARKGREEN  0x0320 → #006400
+           COLOR_YELLOW     0xFFE0 → #FFFF00
+           COLOR_ORANGE     0xFD20 → #FFA400
+           COLOR_RED        0xF800 → #FF0000
+           COLOR_MAROON     0x7800 → #780000
+           COLOR_BLUEGREEN  0x0452 → #008894
+           COLOR_DARKBLUE   0x0019 → #0000CD
+           COLOR_PURPLE     0xA81F → #A800F8
+           COLOR_TEAL       0x04B1 → #00968C
+           0xC81F (bright purple/violet) → #CA00FC
+           0x4208 (close-btn bg)         → #404040
+           0x1082 (disabled dark)        → #101010  */
+
+        body {
+            background-color: #1a1a1a;
+            color: #ffffff;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 30px;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #bezel-scroller {
+            overflow-x: auto;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            padding-bottom: 4px;
+        }
+
+        /* patched3: #transport-row, .connect-btn, #wifi-connect-btn, #wifi-ip
+           rules removed — the transport row was replaced by automatic
+           hostname-based connection. */
+
+        /* ─── patched3: theme tokens ──────────────────────────────────────
+           Defaults below match CLASSIC.  Dark themes (MIDNIGHT, FOREST) only
+           override --display-bg.  DAYLIGHT also remaps text/accent tokens to
+           dark equivalents — mirrors firmware themedText() in patched3.ino.
+           Inline color attributes on display content reference these vars,
+           so a single body class swap repaints the whole preview. */
+        :root {
+            --display-bg:        #000000;
+            --text-primary:      #FFFFFF;
+            --text-muted:        #C8C8C8;
+            --text-disabled:     #787878;
+            --accent-green:      #ADFF2F;
+            --accent-cyan:       #00FFFF;
+            --accent-yellow:     #FFFF00;
+            --accent-magenta:    #CA00FC;
+            --accent-red-dark:   #C81800;
+        }
+        body.theme-midnight  { --display-bg: #000048; }   /* firmware 0x0009 */
+        body.theme-forest    { --display-bg: #002400; }   /* firmware 0x0120 */
+        body.theme-daylight  {
+            --display-bg:        #B8BCB8;
+            --text-primary:      #000000;
+            --text-muted:        #404040;
+            --text-disabled:     #404040;
+            --accent-green:      #036020;
+            --accent-cyan:       #0000C8;
+            --accent-yellow:     #805400;
+            --accent-magenta:    #780078;
+            --accent-red-dark:   #780000;
+        }
+
+        #hardware-bezel {
+            padding: 20px 20px 30px 20px;
+            background-color: #111;
+            border-radius: 10px;
+            box-shadow: inset 0 0 10px #000, 0 10px 30px rgba(0,0,0,0.8);
+            position: relative;   /* anchor for #bezel-trigger-led below */
+        }
+
+        /* patched3: shaded sphere shutter indicator inside the simulated display.
+           Replaces the three stacked fillCircle calls with a real radial gradient.
+           Coordinates roughly mirror firmware (113, 298). */
+        #shutter-sphere {
+            position: absolute;
+            left: 105px;  top: 290px;  width: 16px;  height: 16px;
+            border-radius: 50%;
+            background: radial-gradient(circle at 33% 30%,
+                #DFFFFF 0%, #00C8C0 35%, #006464 75%, #002424 100%);
+            box-shadow: 0 0 4px rgba(0, 200, 192, 0.6);
+            opacity: 0;
+            transition: opacity 90ms ease-out;
+            pointer-events: none;
+        }
+        #shutter-sphere.firing { opacity: 1; }
+
+        /* patched3: physical-LED mirror on the bezel.
+           Mimics the active-low TRIGGER_LED wired to pin A3.
+           Background + glow are set inline by applyTriggerVisuals() so the
+           green brightness can scale continuously with state.ledDuty:
+             • disabled (!ledEnabled) → red dome (LED off / inhibited)
+             • enabled, low duty      → very dark green (barely armed)
+             • enabled, high duty     → bright pure green
+             • firing                 → white-cored bright green + strong glow */
+        #bezel-trigger-led {
+            position: relative;
+            width: 18px;  height: 18px;
+            border-radius: 50%;
+            flex: 0 0 auto;
+            transition: box-shadow 80ms ease-out;
+            /* background + box-shadow are set inline from JS */
+        }
+        /* patched3 v4: grid layout — flex was collapsing on mobile when the
+           connection-status text was wide enough to wrap.  Grid with explicit
+           1fr/auto columns is bulletproof: status takes available space, LED
+           dot sits at the right edge.  white-space:nowrap on status prevents
+           internal text-wrapping that pushed the LED below. */
+        #bezel-bottom-row {
+            margin-top: 340px;
+            display: flex !important;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 8px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        #bezel-bottom-row #connection-status {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            order: 2;
+        }
+        #bezel-trigger-led { order: 1; }
+        /* Build marker — bump suffix every iteration to see what's loaded. */
+        #bezel-bottom-row::before {
+            content: "v6";
+            font-family: monospace;
+            font-size: 8px;
+            color: #444;
+        }
+
+        #ili9341-display {
+            width: 240px;
+            height: 320px;
+            background-color: var(--display-bg);
+            position: relative;
+            transform: scale(2.0);
+            transform-origin: top center;
+            overflow: hidden;
+            -webkit-font-smoothing: none;
+        }
+
+        .screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: none; background-color: var(--display-bg);
+        }
+        .screen.active { display: block; }
+
+        /* --- ADAFRUIT GFX EMULATION --- */
+        .gfx-text { position: absolute; line-height: 1; white-space: nowrap; font-size: 12px; }
+        .gfx-btn {
+            position: absolute; display: flex; justify-content: center; align-items: center;
+            cursor: pointer; border-radius: 3px; color: #FFFFFF;
+            font-weight: bold; box-sizing: border-box; font-size: 14px;
+        }
+        .gfx-btn:active { filter: brightness(1.5); }
+
+        .title-stripe {
+            position: absolute; height: 28px;
+            background-color: #0000CD; border-radius: 3px; color: #00FFFF;
+            padding: 0 12px; font-size: 11px; font-weight: bold; box-sizing: border-box;
+            display: flex; align-items: center;
+        }
+
+        /* --- SHARED BUTTON POSITIONS --- */
+        .btn-menu   { left: 20px; width: 200px; height: 35px; font-size: 13px; }
+        .btn-close-x { left: 205px; top: 2px; width: 33px; height: 33px;
+                       background: #404040; color: #FF0000; font-size: 16px; z-index: 100; }
+        .btn-adj { width: 50px; height: 40px; font-size: 18px; }
+        .adj-row { position: absolute; left: 0; width: 240px; height: 40px; }
+
+        /* --- MAIN SCREEN --- */
+        #bt-rune {
+            position: absolute; left: 8px; top: 7px; width: 22px; height: 30px;
+            cursor: pointer; border-radius: 7px; overflow: hidden;
+        }
+        #tof-menu-zone { position: absolute; left: 33px; top: 0px; width: 60px; height: 42px; cursor: pointer; }
+        #signal-bar-outline { position: absolute; left: 11px; top: 12px; width: 42px; height: 10px;
+                              border: 1px solid #787878; box-sizing: border-box; }
+        #signal-bar-fill { width: 60%; height: 100%; background-color: #00FF00; }
+
+        #btn-fov-info {
+            position: absolute; left: 152px; top: 2px; width: 44px; height: 40px; cursor: pointer;
+        }
+        .fov-bullet { position: absolute; top: 20px; width: 2px; height: 2px; background: #CA00FC; border-radius: 50%; }
+        .fov-err     { color: inherit; letter-spacing: 0; }
+        .fov-unit    { }
+
+        /* Gear icon zone */
+        #btn-gear {
+            position: absolute; left: 190px; top: 0px; width: 50px; height: 50px;
+            display: flex; justify-content: center; align-items: center; cursor: pointer;
+        }
+
+        /* --- OBJECTIVES --- */
+        .btn-obj { top: 200px; width: 64px; height: 64px; font-size: 16px; }
+        .btn-obj.active { border: 2px solid #FFF; }
+
+        /* --- STACK CALC / TIME --- */
+        .stack-row { position: absolute; left: 0; width: 240px; cursor: pointer; height: 33px; }
+        .stack-row:active { background-color: #111; }
+
+        #plot-area { position: absolute; left: 45px; top: 40px; width: 189px; height: 242px;
+                     box-sizing: border-box; }
+        #legend-box { position: absolute; left: 159px; top: 50px; width: 75px; height: 100px;
+                      background-color: #111; border: 1px solid #404040; padding: 4px;
+                      box-sizing: border-box; font-size: 9px; color: #FFF; }
+        .leg-row { display: flex; justify-content: space-between; margin-bottom: 2px; }
+
+        /* --- BRIGHTNESS SLIDERS --- */
+        .slider-track {
+            position: absolute; left: 15px; width: 210px; height: 22px;
+            background: #787878; border-radius: 2px; border: 1px solid #C0C0C0;
+            box-sizing: border-box; cursor: pointer; overflow: hidden;
+        }
+        .slider-fill { height: 100%; border-radius: 2px; transition: none; }
+        .slider-thumb {
+            position: absolute; top: 0; width: 4px; height: 100%;
+            background: white; transform: translateX(-2px);
+        }
+        .slider-track { touch-action: none; }
+
+        /* --- SCREEN TIMEOUT ADJUSTERS --- */
+        .timeout-val {
+            position: absolute; left: 60px; width: 120px; text-align: center;
+            font-size: 16px; color: #ADFF2F; font-weight: bold;
+        }
+
+        /* --- THEME SWATCHES --- */
+        .theme-swatch {
+            position: absolute; width: 50px; height: 35px; top: 235px;
+            border-radius: 3px; cursor: pointer; display: flex;
+            justify-content: center; align-items: center;
+            font-size: 16px; font-weight: bold; border: 1px solid #787878;
+        }
+        .theme-swatch.active { border: 2px solid white; }
+
+        /* --- TINT SLIDER --- */
+        #tint-track {
+            position: absolute; left: 70px; width: 155px; height: 12px;
+            background: #787878; border-radius: 2px; top: 193px;
+            cursor: pointer; box-sizing: border-box;
+        }
+        #tint-fill {
+            height: 100%; border-radius: 2px; background: #00FF00;
+        }
+        #tint-center { position: absolute; left: 50%; top: -3px; width: 1px; height: 18px; background: white; }
+
+        /* --- CALIB BLOCK (MAIN) --- */
+        #calib-block {
+            position: absolute; left: 2px; top: 280px; width: 94px; height: 35px;
+            border: 1px solid #282928; border-radius: 3px; box-sizing: border-box;
+            cursor: pointer; padding: 3px 4px;
+        }
+        /* --- BT INFO EXTRA ROWS --- */
+        .bt-row { position: absolute; width: 240px; height: 30px; }
+
+        /* --- RESPONSIVE MOBILE SCALING --- */
+        @media (max-width: 850px) {
+            body {
+                margin-top: 16px;       /* tighter top padding on mobile */
+                overflow-x: hidden;
+            }
+
+            /* Scale and bezel-bottom-row margin-top are set by applyScale() in JS,
+               which fills ~92 % of screen width on mobile and caps at 2× on desktop. */
+            #connection-status {
+                font-size: 11px;
+            }
+
+            /* Slightly thinner bezel for mobile to maximize screen real estate */
+            #hardware-bezel {
+                padding: 15px 15px 20px 15px;
+            }
+
+            /* patched3: #wifi-ip rule removed with the transport row */
+
+            /* No horizontal scrollbar needed — display fits within 375px at scale(1.4) */
+            #bezel-scroller {
+                overflow-x: hidden;
+            }
+        }
+
+    </style>
+</head>
+<body>
+
+    <!-- patched3: transport row removed.  WebSocket now auto-connects to
+         window.location.hostname on page load (see init block at bottom). -->
+
+    <div id="bezel-scroller">
+    <div id="hardware-bezel">
+        <div id="ili9341-display">
+
+            <!-- ===================== MAIN SCREEN ===================== -->
+            <div id="screen-main" class="screen active">
+                <div id="bt-rune" onclick="switchScreen('screen-btinfo')">
+                    <svg width="22" height="30" viewBox="0 0 22 30">
+                        <rect id="bt-rune-bg" width="22" height="30" rx="7" fill="#780000"/>
+                        <line x1="11" y1="5"  x2="11" y2="25" stroke="white" stroke-width="2"/>
+                        <line x1="11" y1="5"  x2="16" y2="10" stroke="white" stroke-width="2"/>
+                        <line x1="16" y1="10" x2="11" y2="15" stroke="white" stroke-width="2"/>
+                        <line x1="11" y1="15" x2="16" y2="20" stroke="white" stroke-width="2"/>
+                        <line x1="16" y1="20" x2="11" y2="25" stroke="white" stroke-width="2"/>
+                        <line x1="6"  y1="10" x2="16" y2="20" stroke="white" stroke-width="2"/>
+                        <line x1="6"  y1="20" x2="16" y2="10" stroke="white" stroke-width="2"/>
+                    </svg>
+                </div>
+
+                <div id="tof-menu-zone" onclick="switchScreen('screen-sensorinfo')">
+                    <div id="signal-bar-outline"><div id="signal-bar-fill"></div></div>
+                    <div class="gfx-text" style="left: 11px; top: 26px; color: var(--accent-yellow); font-size: 9px;">TOF int</div>
+                </div>
+
+                <!-- FOV Info zone: two purple bullets flanking text -->
+                <!-- WiFi status zone: top-middle x=93..151 -->
+                <div id="wifi-zone" onclick="switchScreen('screen-wifiinfo')"
+                     style="position:absolute; left:93px; top:0; width:59px; height:42px; cursor:pointer; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:1px;">
+                    <!-- 4-bar signal strength indicator -->
+                    <svg id="wifi-bars" width="20" height="14" viewBox="0 0 20 14">
+                        <rect id="wbar-1" x="0"  y="10" width="3" height="4"  fill="#404040" rx="0.5"/>
+                        <rect id="wbar-2" x="5"  y="7"  width="3" height="7"  fill="#404040" rx="0.5"/>
+                        <rect id="wbar-3" x="10" y="4"  width="3" height="10" fill="#404040" rx="0.5"/>
+                        <rect id="wbar-4" x="15" y="0"  width="3" height="14" fill="#404040" rx="0.5"/>
+                    </svg>
+                    <div id="wifi-zone-label" style="font-size:8px; color: var(--text-disabled); letter-spacing:0.5px;">NO WIFI</div>
+                    <div id="wifi-zone-pps"   style="font-size:7px; color: var(--text-disabled); display:none;"></div>
+                </div>
+
+                <div id="btn-fov-info" onclick="switchScreen('screen-fovinfo')">
+                    <div class="fov-bullet" style="left: 3px;"></div>
+                    <div class="gfx-text" style="left: 9px; top: 10px; color: var(--accent-magenta); font-size: 10px; text-align: center;">FOV<br>Info</div>
+                    <div class="fov-bullet" style="left: 33px;"></div>
+                </div>
+
+                <!-- Gear icon — 8-tooth trapezoidal profile, single evenodd path -->
+                <div id="btn-gear" onclick="switchScreen('screen-settings')">
+                    <svg width="26" height="26" viewBox="-14 -14 28 28">
+                        <path fill-rule="evenodd" fill="#00FF00" d="M6.79,-1.69 L10.83,-1.91 L10.83,1.91 L6.79,1.69 L6.00,3.61 L9.01,6.31 L6.31,9.01 L3.61,6.00 L1.69,6.79 L1.91,10.83 L-1.91,10.83 L-1.69,6.79 L-3.61,6.00 L-6.31,9.01 L-9.01,6.31 L-6.00,3.61 L-6.79,1.69 L-10.83,1.91 L-10.83,-1.91 L-6.79,-1.69 L-6.00,-3.61 L-9.01,-6.31 L-6.31,-9.01 L-3.61,-6.00 L-1.69,-6.79 L-1.91,-10.83 L1.91,-10.83 L1.69,-6.79 L3.61,-6.00 L6.31,-9.01 L9.01,-6.31 L6.00,-3.61 Z M3,0 A3,3 0 1 0 -3,0 A3,3 0 1 0 3,0 Z"/>
+                    </svg>
+                </div>
+
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 50px; font-size: 15px; color: var(--text-disabled);">AVG FOV:</div>
+                <div id="val-fov" class="gfx-text" style="width: 240px; text-align: center; top: 82px; font-size: 28px; color: var(--accent-green); font-weight: bold;">1.25 mm</div>
+
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 130px; font-size: 15px; color: var(--text-disabled);">DISTANCE:</div>
+                <div id="val-dist" class="gfx-text" style="width: 240px; text-align: center; top: 147px; font-size: 22px; color: var(--accent-cyan);">142 mm</div>
+
+                <div id="btn-obj-1" class="gfx-btn btn-obj" style="left: 2px;"  onclick="setObjective(1)">5x</div>
+                <div id="btn-obj-2" class="gfx-btn btn-obj" style="left: 88px;" onclick="setObjective(2)">10x</div>
+                <div id="btn-obj-3" class="gfx-btn btn-obj" style="left: 174px;" onclick="setObjective(3)">20x</div>
+
+                <div id="calib-block" onclick="switchScreen('screen-about')">
+                    <div id="calib-status" style="color: #FFA500; font-size: 10px; font-weight: bold;">CALIB: FACTORY</div>
+                    <div style="color: var(--text-disabled); font-size: 9px; margin-top: 1px;">Auto FOV V11</div>
+                </div>
+
+                <div class="gfx-btn" style="left: 139px; top: 280px; width: 92px; height: 35px;
+                     background-color: #008894; font-size: 11px;" onclick="switchScreen('screen-calsettings')">CALIBRATE</div>
+
+                <!-- patched3: shaded-sphere shutter indicator. Last in
+                     #screen-main so it z-orders above the calib block. -->
+                <div id="shutter-sphere"></div>
+            </div>
+
+            <!-- ===================== SETTINGS (APP_SETTINGS) ===================== -->
+            <div id="screen-settings" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 100px;">SETTINGS</div>
+                <div class="gfx-btn btn-close-x" onclick="goBack('screen-main')">X</div>
+
+                <!-- Brightness mini-bar (static preview in settings) -->
+                <div class="gfx-text" style="left: 15px; top: 52px; font-size: 11px; color: var(--text-muted);">BRIGHTNESS</div>
+                <div id="settings-bright-pct" class="gfx-text" style="right: 15px; top: 52px; font-size: 11px; color: var(--accent-green);">50%</div>
+                <div class="slider-track" style="top: 72px;" id="settings-slider" onmousedown="startSlider(event,'brightness')" ontouchstart="startSlider(event,'brightness')">
+                    <div id="settings-slider-fill" class="slider-fill" style="background:#FFD700; width:50%;"></div>
+                    <div id="settings-slider-thumb" class="slider-thumb" style="left:50%;"></div>
+                </div>
+
+                <!-- STACK CALC with calculator icon -->
+                <div class="gfx-btn btn-menu" style="top: 127px; background-color: #008894;"
+                     onclick="switchScreen('screen-stackcalc')">
+                    <svg style="position:absolute;left:7px;" width="14" height="25" viewBox="0 0 14 25">
+                        <rect x="0" y="0" width="14" height="25" stroke="white" stroke-width="1" fill="none"/>
+                        <rect x="1" y="1" width="12" height="6" fill="#ADFF2F"/>
+                        <rect x="1" y="9"  width="3" height="3" fill="white"/>
+                        <rect x="5" y="9"  width="3" height="3" fill="white"/>
+                        <rect x="9" y="9"  width="3" height="3" fill="white"/>
+                        <rect x="1" y="14" width="3" height="3" fill="white"/>
+                        <rect x="5" y="14" width="3" height="3" fill="white"/>
+                        <rect x="9" y="14" width="3" height="3" fill="white"/>
+                        <rect x="7" y="20" width="5" height="2" fill="#ADFF2F"/>
+                        <rect x="7" y="22" width="5" height="2" fill="#ADFF2F"/>
+                    </svg>
+                    <span>STACK CALC</span>
+                </div>
+
+                <!-- BRIGHTNESS with lightbulb icon -->
+                <div class="gfx-btn btn-menu" style="top: 172px; background-color: #0000CD;"
+                     onclick="switchScreen('screen-brightness')">
+                    <svg style="position:absolute;left:7px;" width="20" height="28" viewBox="0 0 20 28">
+                        <circle cx="10" cy="9" r="7" stroke="#ADFF2F" stroke-width="1.5" fill="none"/>
+                        <rect x="5" y="12" width="10" height="5" fill="black"/>
+                        <rect x="7" y="16" width="6" height="2" fill="#ADFF2F"/>
+                        <rect x="8" y="18" width="4" height="3" fill="#ADFF2F"/>
+                        <line x1="7" y1="6" x2="13" y2="12" stroke="#ADFF2F" stroke-width="1.5"/>
+                        <line x1="13" y1="6" x2="7" y2="12" stroke="#ADFF2F" stroke-width="1.5"/>
+                    </svg>
+                    <span>BRIGHTNESS</span>
+                </div>
+
+                <!-- MEMORY with DIMM icon -->
+                <div class="gfx-btn btn-menu" style="top: 217px; height: 38px; background-color: #008894; color: #000;"
+                     onclick="switchScreen('screen-memory')">
+                    <svg style="position:absolute;left:5px;" width="24" height="14" viewBox="0 0 24 14">
+                        <rect x="0" y="0" width="24" height="14" fill="#006400" stroke="#ADFF2F" stroke-width="1"/>
+                        <rect x="2"  y="2" width="8"  height="5" fill="black"/>
+                        <rect x="14" y="2" width="8"  height="5" fill="black"/>
+                        <rect x="1" y="11" width="22" height="2" fill="#FFD600"/>
+                        <line x1="3"  y1="11" x2="3"  y2="13" stroke="#006400" stroke-width="1"/>
+                        <line x1="5"  y1="11" x2="5"  y2="13" stroke="#006400" stroke-width="1"/>
+                        <line x1="7"  y1="11" x2="7"  y2="13" stroke="#006400" stroke-width="1"/>
+                        <line x1="9"  y1="11" x2="9"  y2="13" stroke="#006400" stroke-width="1"/>
+                        <line x1="11" y1="11" x2="11" y2="13" stroke="#006400" stroke-width="1"/>
+                        <line x1="15" y1="11" x2="15" y2="13" stroke="#006400" stroke-width="1"/>
+                        <line x1="17" y1="11" x2="17" y2="13" stroke="#006400" stroke-width="1"/>
+                        <line x1="19" y1="11" x2="19" y2="13" stroke="#006400" stroke-width="1"/>
+                        <rect x="14" y="11" width="3" height="2" fill="#006400"/>
+                    </svg>
+                    <span>MEMORY</span>
+                </div>
+
+                <div class="gfx-btn btn-menu" style="top: 265px; background-color: #000; border: 1px solid #404040;"
+                     onclick="goBack('screen-main')">GO BACK</div>
+            </div>
+
+            <!-- ===================== STACK CALC ===================== -->
+            <div id="screen-stackcalc" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 110px;">STACK CALC</div>
+                <div id="val-calc-obj" class="gfx-text" style="right: 10px; top: 12px; color: var(--accent-green); font-size: 11px;">OBJ: 20x</div>
+
+                <div class="stack-row" style="top: 45px;" onclick="setStackSel(0)">
+                    <div id="lbl-step" class="gfx-text" style="left: 10px; top: 8px; color: var(--accent-green); font-size: 12px;">Step Size:</div>
+                    <div id="val-step" class="gfx-text" style="left: 115px; top: 6px; font-size: 16px; color: var(--text-primary);">0.468 um</div>
+                </div>
+                <div class="stack-row" style="top: 78px;" onclick="setStackSel(1)">
+                    <div id="lbl-imgs" class="gfx-text" style="left: 10px; top: 8px; color: var(--text-primary); font-size: 12px;">Images:</div>
+                    <div id="val-imgs" class="gfx-text" style="left: 115px; top: 6px; font-size: 16px; color: var(--text-primary);">128</div>
+                </div>
+
+                <div id="val-dof"     class="gfx-text" style="left: 10px; top: 110px; color: var(--text-primary); font-size: 11px;">DOF: 3.118 um</div>
+                <div id="val-depth"   class="gfx-text" style="left: 10px; top: 142px; color: var(--text-disabled); font-size: 11px;">Stack Depth: 59.4 um</div>
+                <div id="val-overlap" class="gfx-text" style="left: 10px; top: 174px; color: #00FF00; font-size: 11px;">Overlap: 85%</div>
+
+                <div class="adj-row" style="top: 207px;">
+                    <div class="gfx-btn btn-adj" style="left: 10px; background-color: #FF0000;" onclick="adjStack(-2)">--</div>
+                    <div class="gfx-btn btn-adj" style="left: 65px; background-color: var(--text-disabled);" onclick="adjStack(-1)">-</div>
+                    <div class="gfx-btn btn-adj" style="left: 120px; background-color: var(--text-disabled);" onclick="adjStack(1)">+</div>
+                    <div class="gfx-btn btn-adj" style="left: 175px; background-color: #006400;" onclick="adjStack(2)">++</div>
+                </div>
+
+                <div class="gfx-btn" style="left: 10px; top: 258px; width: 105px; height: 50px;
+                     background: #0000CD; font-size: 12px;" onclick="switchScreen('screen-stacktime')">TIME CALC</div>
+                <div class="gfx-btn" style="left: 125px; top: 258px; width: 105px; height: 50px;
+                     background: #000; font-size: 12px; border: 1px solid #787878;"
+                     onclick="goBack('screen-settings')">GO BACK</div>
+            </div>
+
+            <!-- ===================== STACK TIME ===================== -->
+            <div id="screen-stacktime" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 110px;">STACK TIME</div>
+
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 58px; color: var(--text-disabled);">Step: <span id="time-val-step">0.468</span> um</div>
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 76px; color: var(--text-disabled);">Depth: <span id="time-val-depth">59.4</span> um</div>
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 94px; color: var(--text-disabled);">IMGS: <span id="time-val-imgs">128</span></div>
+
+                <div class="gfx-text" style="left: 10px; top: 124px; color: var(--accent-green);">Sec/Step:</div>
+                <div id="val-secstep" class="gfx-text" style="left: 115px; top: 122px; font-size: 16px; color: var(--text-primary);">2.0 s</div>
+
+                <div class="adj-row" style="top: 155px;">
+                    <div class="gfx-btn btn-adj" style="left: 10px; background-color: #780000;" onclick="adjTime(-2)">--</div>
+                    <div class="gfx-btn btn-adj" style="left: 65px; background-color: var(--text-disabled);" onclick="adjTime(-1)">-</div>
+                    <div class="gfx-btn btn-adj" style="left: 120px; background-color: var(--text-disabled);" onclick="adjTime(1)">+</div>
+                    <div class="gfx-btn btn-adj" style="left: 175px; background-color: #006400;" onclick="adjTime(2)">++</div>
+                </div>
+
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 224px; color: var(--accent-magenta);">Calculated Stack Time</div>
+                <div id="val-totaltime" class="gfx-text" style="width: 240px; text-align: center; top: 244px; color: #FFA500; font-size: 16px;">4m 16s</div>
+
+                <div class="gfx-btn" style="left: 60px; top: 274px; width: 120px; height: 40px;
+                     background: #000; border: 1px solid #787878;" onclick="goBack('screen-stackcalc')">GO BACK</div>
+            </div>
+
+            <!-- ===================== FOV INFO ===================== -->
+            <div id="screen-fovinfo" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 90px;">CALIB INFO</div>
+                <div class="gfx-btn btn-close-x" onclick="goBack('screen-main')">X</div>
+
+                <div id="fovinfo-status" class="gfx-text" style="width: 240px; text-align: center; top: 60px; color: var(--accent-green); font-size: 12px;">Status: —</div>
+
+                <div class="gfx-text" style="left: 20px; top: 95px;  color: var(--text-disabled); font-size: 12px;">Slope:</div>
+                <div id="fovinfo-slope" class="gfx-text" style="right: 15px; top: 95px;  color: var(--text-primary); font-size: 12px;">—</div>
+                <div class="gfx-text" style="left: 20px; top: 120px; color: var(--text-disabled); font-size: 12px;">Intercept:</div>
+                <div id="fovinfo-intercept" class="gfx-text" style="right: 15px; top: 120px; color: var(--text-primary); font-size: 12px;">—</div>
+                <div class="gfx-text" style="left: 20px; top: 145px; color: var(--text-disabled); font-size: 12px;">Base Err:</div>
+                <div id="fovinfo-err" class="gfx-text" style="right: 15px; top: 145px; color: #00FF00; font-size: 12px;">—</div>
+                <div class="gfx-text" style="left: 20px; top: 170px; color: var(--text-disabled); font-size: 12px;">R-Squared:</div>
+                <div id="fovinfo-r2" class="gfx-text" style="right: 15px; top: 170px; color: #00FF00; font-size: 12px;">—</div>
+                <div class="gfx-text" style="left: 20px; top: 200px; color: var(--text-disabled); font-size: 12px;">Photo Width:</div>
+                <div id="fovinfo-photowidth" class="gfx-text" style="right: 15px; top: 200px; color: var(--text-primary); font-size: 12px;">—</div>
+
+                <div class="gfx-btn" style="left: 60px; top: 270px; width: 120px; height: 40px;
+                     background: #000; border: 1px solid #787878; color: #FFF;"
+                     onclick="switchScreen('screen-calgraph')">GRAPH</div>
+            </div>
+
+            <!-- ===================== CAL GRAPH ===================== -->
+            <div id="screen-calgraph" class="screen">
+                <div class="gfx-btn btn-close-x" onclick="goBack('screen-fovinfo')">X</div>
+                <!-- Y-axis label rotated -->
+                <div class="gfx-text" style="left:2px; top:150px; color: var(--accent-red-dark); font-size:9px;
+                     transform:rotate(-90deg); transform-origin:center center; white-space:nowrap;">FOV (mm)</div>
+                <!-- X-axis label -->
+                <div class="gfx-text" style="width:189px; left:45px; text-align:center; top:288px; color: var(--accent-red-dark); font-size:9px;">Distance (mm)</div>
+
+                <!-- Plot area: axes drawn on canvas, not CSS borders -->
+                <div id="plot-area" style="position:absolute; left:45px; top:40px; width:188px; height:241px; overflow:hidden;">
+                    <!-- 2× canvas buffer for crisp rendering at the 2× CSS transform -->
+                    <canvas id="cal-canvas" width="376" height="482"
+                            style="position:absolute; left:0; top:0; width:188px; height:241px; display:block;"></canvas>
+                </div>
+
+                <!-- Legend (sits over the graph, top-right) -->
+                <div id="legend-box">
+                    <div class="leg-row"><span style="color: var(--text-disabled)">R²:</span><span id="calgraph-r2" style="color:#00FF00">—</span></div>
+                    <div class="leg-row"><span style="color: var(--text-disabled)">m:</span><span id="calgraph-slope">—</span></div>
+                    <div class="leg-row"><span style="color: var(--text-disabled)">b:</span><span id="calgraph-intercept">—</span></div>
+                    <div class="leg-row"><span style="color: var(--text-disabled)">RMSE:</span><span id="calgraph-rmse" style="color:#00FF00">—</span></div>
+                    <div style="margin-top:8px; line-height:1.6;">
+                        <span style="color:#00FF00; font-size:10px;">●</span><span style="color: var(--text-disabled); font-size:8px;"> ≤RMSE</span><br>
+                        <span style="color:#FF6600; font-size:10px;">●</span><span style="color: var(--text-disabled); font-size:8px;"> &gt;RMSE</span>
+                    </div>
+                </div>
+                <div id="graph-n" class="gfx-text" style="right:14px; top:286px; font-size:8px; color:#404040;"></div>
+            </div>
+
+            <!-- ===================== TOF SENSOR INFO ===================== -->
+            <div id="screen-sensorinfo" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 100px;">TOF SENSOR</div>
+                <div class="gfx-text" style="left: 20px; top: 60px; color: var(--text-disabled);">Signal:</div>
+                <div id="sensor-signal" class="gfx-text" style="right: 15px; top: 60px; color: var(--accent-green);">—</div>
+                <div class="gfx-text" style="left: 20px; top: 90px; color: var(--text-disabled);">Ambient:</div>
+                <div id="sensor-ambient" class="gfx-text" style="right: 15px; top: 90px; color: var(--text-disabled);">—</div>
+                <div class="gfx-text" style="left: 20px; top: 120px; color: var(--text-disabled);">Status:</div>
+                <div id="sensor-status" class="gfx-text" style="right: 15px; top: 120px; color: #00FF00;">—</div>
+
+                <div id="btn-sensor-toggle" class="gfx-btn"
+                     style="left: 10px; top: 162px; width: 220px; height: 40px; background-color: #780000;"
+                     onclick="toggleSensor()">SLEEP SENSOR</div>
+
+                <div id="btn-sensor-hiref" class="gfx-btn"
+                     style="left: 10px; top: 210px; width: 220px; height: 38px; background-color: var(--text-disabled);"
+                     onclick="toggleHighRefl()">HIGH REFLECTIVITY: OFF</div>
+
+                <div class="gfx-btn"
+                     style="left: 60px; top: 257px; width: 120px; height: 38px; background-color: #000; border: 1px solid #787878;"
+                     onclick="goBack('screen-main')">GO BACK</div>
+            </div>
+
+            <!-- ===================== BLUETOOTH INFO ===================== -->
+            <div id="screen-btinfo" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 100px;">BLUETOOTH</div>
+                <div class="gfx-btn btn-close-x" onclick="goBack('screen-main')">X</div>
+
+                <!-- Static rows (MAC, Bonds) -->
+                <div class="gfx-text" style="left: 20px; top: 42px; color: var(--text-disabled);">MAC:</div>
+                <div class="gfx-text" style="right: 15px; top: 42px; color: var(--text-muted);" id="bt-mac">—</div>
+                <div class="gfx-text" style="left: 20px; top: 74px; color: var(--text-disabled);">Bonds:</div>
+                <div class="gfx-text" style="right: 15px; top: 74px; color: var(--accent-green);" id="bt-bonds">—</div>
+
+                <!-- Live rows (Status, Devices, RSSI, MTU) — shown/hidden by JS -->
+                <div class="bt-row" style="top: 106px;">
+                    <div class="gfx-text" style="left: 10px; top: 6px; color: var(--text-disabled);">Status:</div>
+                    <div id="btinfo-status" class="gfx-text" style="right: 15px; top: 6px; color: #FF0000;">Ready to pair</div>
+                </div>
+                <div id="bt-devices-row" class="bt-row" style="top: 136px; display: none;">
+                    <div class="gfx-text" style="left: 10px; top: 6px; color: var(--text-disabled);">Devices:</div>
+                    <div id="bt-devices" class="gfx-text" style="right: 15px; top: 6px; color: var(--text-primary);">1 device</div>
+                </div>
+                <div id="bt-rssi-row" class="bt-row" style="top: 166px; display: none;">
+                    <div class="gfx-text" style="left: 10px; top: 6px; color: var(--text-disabled);">RSSI:</div>
+                    <div id="bt-rssi" class="gfx-text" style="right: 15px; top: 6px; color: #00FF00;">-55 dBm</div>
+                </div>
+                <div id="bt-mtu-row" class="bt-row" style="top: 196px; display: none;">
+                    <div class="gfx-text" style="left: 10px; top: 6px; color: var(--text-disabled);">MTU:</div>
+                    <div id="bt-mtu" class="gfx-text" style="right: 15px; top: 6px; color: var(--text-primary);">244 bytes</div>
+                </div>
+
+                <div id="btn-bt-test" class="gfx-btn"
+                     style="left: 20px; top: 232px; width: 200px; height: 36px; background: #101010; color: var(--text-disabled);"
+                     onclick="btTestAlert()">TEST ALERT</div>
+
+                <div class="gfx-btn"
+                     style="left: 20px; top: 275px; width: 200px; height: 36px; background: #780000;"
+                     onclick="btResetBonds()">RESET BONDS</div>
+            </div>
+
+            <!-- ===================== ABOUT ===================== -->
+            <div id="screen-about" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 70px;">ABOUT</div>
+                <div class="gfx-btn btn-close-x" onclick="goBack('screen-main')">X</div>
+
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 75px; font-size: 20px; color: var(--accent-green);">Auto FOV V11</div>
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 100px; font-size: 12px; color: var(--text-disabled);">Field-of-view calculator</div>
+
+                <div class="gfx-text" style="left: 15px; top: 132px; color: var(--text-disabled);">Built:</div>
+                <div id="about-built" class="gfx-text" style="right: 15px; top: 132px; color: var(--text-primary);">—</div>
+                <div class="gfx-text" style="left: 15px; top: 154px; color: var(--text-disabled);">Time:</div>
+                <div id="about-time" class="gfx-text" style="right: 15px; top: 154px; color: var(--text-primary);">—</div>
+                <div class="gfx-text" style="left: 15px; top: 176px; color: var(--text-disabled);">Sketch size:</div>
+                <div id="about-sketch" class="gfx-text" style="right: 15px; top: 176px; color: var(--accent-green);">—</div>
+                <div class="gfx-text" style="left: 15px; top: 198px; color: var(--text-disabled);">Free flash:</div>
+                <div id="about-freeflash" class="gfx-text" style="right: 15px; top: 198px; color: var(--text-disabled);">—</div>
+                <div class="gfx-text" style="left: 15px; top: 218px; color: var(--text-disabled);">Source:</div>
+                <div id="about-lines" class="gfx-text" style="right: 15px; top: 218px; color: var(--text-disabled);">—</div>
+                <div class="gfx-text" style="left: 15px; top: 238px; color: var(--text-disabled);">Chip:</div>
+                <div id="about-chip" class="gfx-text" style="right: 15px; top: 238px; color: var(--text-disabled);">—</div>
+
+                <div style="position: absolute; left: 30px; top: 256px; width: 180px; height: 1px; background: #387038;"></div>
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 268px; color: var(--text-disabled);">Developed by</div>
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 292px; font-size: 16px; color: var(--accent-magenta);">Travis Olds</div>
+            </div>
+
+            <!-- ===================== CALIBRATOR SETTINGS ===================== -->
+            <div id="screen-calsettings" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 105px;">CALIBRATOR</div>
+
+                <!-- Row 0: Photo Width -->
+                <div class="stack-row" style="top: 45px; height: 35px;" onclick="setCalSel(0)">
+                    <div id="lbl-calw" class="gfx-text" style="left: 10px; top: 8px; color: var(--accent-green); font-size: 12px;">Photo Width:</div>
+                    <div id="val-calw" class="gfx-text" style="left: 115px; top: 6px; font-size: 16px; color: var(--text-primary);">6960 px</div>
+                </div>
+                <!-- Row 1: Demarc Dist -->
+                <div class="stack-row" style="top: 80px; height: 35px;" onclick="setCalSel(1)">
+                    <div id="lbl-cald" class="gfx-text" style="left: 10px; top: 8px; color: var(--text-primary); font-size: 12px;">Demarc Dist:</div>
+                    <div id="val-cald" class="gfx-text" style="left: 115px; top: 6px; font-size: 16px; color: var(--text-primary);">0.40 mm</div>
+                </div>
+                <!-- Row 2: Cal Points -->
+                <div class="stack-row" style="top: 115px; height: 35px;" onclick="setCalSel(2)">
+                    <div id="lbl-caln" class="gfx-text" style="left: 10px; top: 8px; color: var(--text-primary); font-size: 12px;">Cal Points:</div>
+                    <div id="val-caln" class="gfx-text" style="left: 115px; top: 6px; font-size: 16px; color: var(--text-primary);">10</div>
+                </div>
+
+                <div class="adj-row" style="top: 165px;">
+                    <div class="gfx-btn btn-adj" style="left: 10px; background-color: #FF0000;" onclick="adjCal(-2)">--</div>
+                    <div class="gfx-btn btn-adj" style="left: 65px; background-color: var(--text-disabled);" onclick="adjCal(-1)">-</div>
+                    <div class="gfx-btn btn-adj" style="left: 120px; background-color: var(--text-disabled);" onclick="adjCal(1)">+</div>
+                    <div class="gfx-btn btn-adj" style="left: 175px; background-color: #006400;" onclick="adjCal(2)">++</div>
+                </div>
+
+                <div class="gfx-btn" style="left: 10px; top: 215px; width: 105px; height: 55px; background: #0000CD;"
+                     onclick="startCal()">START CAL</div>
+                <div id="btn-reset-all" class="gfx-btn" style="left: 125px; top: 215px; width: 105px; height: 55px; background: #780000;"
+                     onclick="resetAll()">RESET ALL</div>
+                <div class="gfx-btn" style="left: 60px; top: 280px; width: 120px; height: 35px; background: #FF0000;"
+                     onclick="switchScreen('screen-main')">CANCEL</div>
+            </div>
+
+            <!-- ===================== CAL RUN (stub) ===================== -->
+            <div id="screen-calrun" class="screen">
+                <div class="gfx-text" style="left: 10px; top: 10px; font-size: 13px; color: #0000CD; font-weight: bold;">POINT <span id="calrun-pt">1</span>/<span id="calrun-total">10</span></div>
+
+                <div style="position: absolute; left: 20px; top: 40px; width: 200px; height: 45px; background: #000;">
+                    <div id="calrun-pixels" class="gfx-text" style="width: 200px; text-align: center; top: 10px; font-size: 22px; color: var(--accent-green); font-weight: bold;">1920 px</div>
+                </div>
+
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 95px; font-size: 10px; color: var(--text-disabled);">take photo, input pixel #</div>
+                <div class="gfx-text" style="width: 240px; text-align: center; top: 108px; font-size: 10px; color: var(--text-disabled);">and hit capture &amp; save</div>
+
+                <div class="adj-row" style="top: 135px;">
+                    <div class="gfx-btn btn-adj" style="left: 10px; background-color: #FF0000;" onclick="adjCalRun(-2)">--</div>
+                    <div class="gfx-btn btn-adj" style="left: 65px; background-color: var(--text-disabled);" onclick="adjCalRun(-1)">-</div>
+                    <div class="gfx-btn btn-adj" style="left: 120px; background-color: var(--text-disabled);" onclick="adjCalRun(1)">+</div>
+                    <div class="gfx-btn btn-adj" style="left: 175px; background-color: #006400;" onclick="adjCalRun(2)">++</div>
+                </div>
+
+                <div class="gfx-btn" style="left: 10px; top: 185px; width: 220px; height: 50px;
+                     background: #ADFF2F; color: #000; font-size: 13px;" onclick="calCaptureSave()">CAPTURE &amp; SAVE</div>
+
+                <div class="gfx-btn" style="left: 5px; top: 245px; width: 72px; height: 35px;
+                     background: #000; border: 1px solid #787878; font-size: 11px;" onclick="calGoBack()">BACK</div>
+                <div id="btn-review" class="gfx-btn" style="left: 82px; top: 245px; width: 72px; height: 35px;
+                     background: #101010; color: #787878; font-size: 11px;" onclick="calReview()">REVIEW</div>
+                <div class="gfx-btn" style="left: 159px; top: 245px; width: 76px; height: 35px;
+                     background: #780000; font-size: 11px;" onclick="calCancel()">CANCEL</div>
+
+                <div id="calrun-status" class="gfx-text" style="left: 5px; top: 288px; color: var(--accent-green); font-size: 10px;"></div>
+            </div>
+
+            <!-- ===================== BRIGHTNESS SETTINGS ===================== -->
+            <div id="screen-brightness" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 100px;">BRIGHTNESS</div>
+
+                <!-- Screen slider -->
+                <div class="gfx-text" style="left: 15px; top: 72px; color: var(--text-disabled); font-size: 11px;">SCREEN</div>
+                <div id="bright-screen-pct" class="gfx-text" style="right: 15px; top: 72px; color: var(--accent-green); font-size: 11px;">50%</div>
+                <div class="slider-track" style="top: 90px;" id="screen-slider" onmousedown="startSlider(event,'brightness')" ontouchstart="startSlider(event,'brightness')">
+                    <div id="screen-slider-fill" class="slider-fill" style="background:#FFD700; width:50%;"></div>
+                    <div id="screen-slider-thumb" class="slider-thumb" style="left:50%;"></div>
+                </div>
+
+                <!-- LED label + value + toggle -->
+                <div class="gfx-text" style="left: 15px; top: 150px; color: var(--text-disabled); font-size: 11px;">LED</div>
+                <div id="bright-led-pct" class="gfx-text" style="left: 80px; top: 150px; color: var(--accent-magenta); font-size: 11px;">25%</div>
+                <div id="btn-led-toggle" class="gfx-btn"
+                     style="left: 155px; top: 148px; width: 75px; height: 26px; background: #00FF00; font-size: 12px;"
+                     onclick="toggleLed()">ON</div>
+
+                <!-- LED slider -->
+                <div class="slider-track" style="top: 184px;" id="led-slider" onmousedown="startSlider(event,'led')" ontouchstart="startSlider(event,'led')">
+                    <div id="led-slider-fill" class="slider-fill" style="background:#A800F8; width:25%;"></div>
+                    <div id="led-slider-thumb" class="slider-thumb" style="left:25%;"></div>
+                </div>
+
+                <!-- SCREEN TIMEOUTS button -->
+                <div class="gfx-btn"
+                     style="left: 20px; top: 226px; width: 200px; height: 32px; background-color: #00968C; font-size: 12px;"
+                     onclick="switchScreen('screen-timeout')">SCREEN TIMEOUTS</div>
+
+                <div class="gfx-btn"
+                     style="left: 60px; top: 274px; width: 120px; height: 40px; background: #000; border: 1px solid #787878;"
+                     onclick="goBack('screen-settings')">GO BACK</div>
+            </div>
+
+            <!-- ===================== SCREEN TIMEOUT + THEMES ===================== -->
+            <div id="screen-timeout" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 90px; background-color: #00968C;">TIMEOUTS</div>
+
+                <!-- DIM row -->
+                <div class="gfx-text" style="left: 15px; top: 58px; color: var(--text-disabled); font-size: 11px;">SCREEN DIM</div>
+                <div class="gfx-btn" style="left: 20px; top: 68px; width: 40px; height: 36px;
+                     background: #780000; font-size: 20px;" onclick="adjTimeout('dim',-1)">-</div>
+                <div id="val-dim" class="timeout-val" style="top: 80px; font-size: 14px; color: var(--accent-green);">2m</div>
+                <div class="gfx-btn" style="left: 180px; top: 68px; width: 40px; height: 36px;
+                     background: #006400; font-size: 20px;" onclick="adjTimeout('dim',1)">+</div>
+
+                <!-- SLEEP row -->
+                <div class="gfx-text" style="left: 15px; top: 130px; color: var(--text-disabled); font-size: 11px;">AUTO SLEEP</div>
+                <div class="gfx-btn" style="left: 20px; top: 140px; width: 40px; height: 36px;
+                     background: #780000; font-size: 20px;" onclick="adjTimeout('sleep',-1)">-</div>
+                <div id="val-sleep" class="timeout-val" style="top: 150px; font-size: 14px; color: var(--accent-magenta);">5m</div>
+                <div class="gfx-btn" style="left: 180px; top: 140px; width: 40px; height: 36px;
+                     background: #006400; font-size: 20px;" onclick="adjTimeout('sleep',1)">+</div>
+
+                <!-- Tint / intensity label + slider -->
+                <div class="gfx-text" style="left: 15px; top: 179px; color: var(--text-disabled); font-size: 11px;">TINT:</div>
+                <div id="tint-track" onmousedown="startSlider(event,'tint')" ontouchstart="startSlider(event,'tint')">
+                    <div id="tint-fill" style="width:50%;"></div>
+                    <div id="tint-center"></div>
+                </div>
+
+                <!-- Theme swatches: CLASSIC, MIDNIGHT, FOREST, DAYLIGHT -->
+                <div id="swatch-0" class="theme-swatch active" style="left: 12px;  background:#0080F8;" onclick="setTheme(0)">
+                    <span style="color:white; font-size:14px; font-weight:bold;">C</span>
+                </div>
+                <div id="swatch-1" class="theme-swatch" style="left: 68px;  background:#181490;" onclick="setTheme(1)">
+                    <span style="color:white; font-size:14px; font-weight:bold;">M</span>
+                </div>
+                <div id="swatch-2" class="theme-swatch" style="left: 124px; background:#00FF00;" onclick="setTheme(2)">
+                    <span style="color:black; font-size:14px; font-weight:bold;">F</span>
+                </div>
+                <div id="swatch-3" class="theme-swatch" style="left: 180px; background:#B8BCB8;" onclick="setTheme(3)">
+                    <span style="color:black; font-size:14px; font-weight:bold;">D</span>
+                </div>
+
+                <div class="gfx-btn" style="left: 60px; top: 282px; width: 120px; height: 35px;
+                     background: #000; border: 1px solid #787878;" onclick="goBack('screen-brightness')">GO BACK</div>
+            </div>
+
+            <!-- ===================== MEMORY & INFO ===================== -->
+            <div id="screen-memory" class="screen">
+                <div class="title-stripe" style="left: 5px; top: 5px; width: 115px; background-color: #006400;">MEMORY &amp; INFO</div>
+                <div class="gfx-btn btn-close-x" onclick="goBack('screen-settings')">X</div>
+
+                <div class="gfx-text" style="left: 15px; top: 60px;  color: var(--text-disabled);">Free heap:</div>
+                <div id="mem-free-heap" class="gfx-text" style="right: 15px; top: 60px;  color: #FFA500;">—</div>
+                <div class="gfx-text" style="left: 15px; top: 86px;  color: var(--text-disabled);">Total heap:</div>
+                <div id="mem-total-heap" class="gfx-text" style="right: 15px; top: 86px;  color: var(--text-primary);">—</div>
+                <div class="gfx-text" style="left: 15px; top: 112px; color: var(--text-disabled);">Lowest free:</div>
+                <div id="mem-lowest-free" class="gfx-text" style="right: 15px; top: 112px; color: #FFA500;">—</div>
+                <div class="gfx-text" style="left: 15px; top: 138px; color: var(--text-disabled);">Sprites alloc:</div>
+                <div id="mem-sprites" class="gfx-text" style="right: 15px; top: 138px; color: var(--text-disabled);">—</div>
+                <div class="gfx-text" style="left: 15px; top: 164px; color: var(--text-disabled);">PSRAM free:</div>
+                <div class="gfx-text" style="right: 15px; top: 164px; color: var(--accent-green);" id="mem-psram-free">none</div>
+                <div class="gfx-text" style="left: 15px; top: 190px; color: var(--text-disabled);">PSRAM total:</div>
+                <div class="gfx-text" style="right: 15px; top: 190px; color: var(--text-primary);" id="mem-psram-total">none</div>
+
+                <div style="position: absolute; left: 10px; top: 215px; width: 220px; height: 1px; background: #404040;"></div>
+
+                <div class="gfx-text" style="left: 15px; top: 222px; color: var(--text-disabled);">Firmware:</div>
+                <div class="gfx-text" style="right: 15px; top: 222px; color: var(--accent-green);">Auto FOV V11</div>
+                <div class="gfx-text" style="left: 15px; top: 248px; color: var(--text-disabled);">CPU:</div>
+                <div id="mem-cpu" class="gfx-text" style="right: 15px; top: 248px; color: var(--text-primary);">240 MHz</div>
+                <div class="gfx-text" style="left: 15px; top: 274px; color: var(--text-disabled);">SDK:</div>
+                <div class="gfx-text" style="right: 15px; top: 274px; color: var(--text-disabled);" id="mem-sdk">5.1.2</div>
+            </div>
+
+            <!-- ===================== CAL REVIEW ===================== -->
+            <div id="screen-calreview" class="screen">
+                <div class="title-stripe" style="left:5px; top:5px; width:115px;">CAL REVIEW</div>
+                <div id="calrev-count" class="gfx-text" style="right:10px; top:12px; color: var(--accent-green); font-size:11px;">0 pts</div>
+
+                <!-- Scrollable point list: 3 rows visible at y=40..175 -->
+                <div id="calrev-list" style="position:absolute; left:0; top:40px; width:240px; height:156px; overflow:hidden;">
+                    <!-- rows injected by JS -->
+                </div>
+
+                <div id="calrev-up" class="gfx-btn" style="left:195px; top:40px;  width:35px; height:40px;
+                     background:#008894; font-size:12px;" onclick="calRevScroll(-1)">▲</div>
+                <div id="calrev-dn" class="gfx-btn" style="left:195px; top:154px; width:35px; height:40px;
+                     background:#008894; font-size:12px;" onclick="calRevScroll(1)">▼</div>
+
+                <div id="btn-retake" class="gfx-btn"
+                     style="left:10px; top:206px; width:105px; height:46px; background:#0000CD; font-size:12px;"
+                     onclick="calRetake()">RETAKE</div>
+                <div class="gfx-btn"
+                     style="left:125px; top:206px; width:105px; height:46px; background:#000; border:1px solid #787878; font-size:12px;"
+                     onclick="goBack('screen-calrun')">GO BACK</div>
+
+                <div id="calrev-sel-hint" class="gfx-text"
+                     style="width:240px; text-align:center; top:262px; font-size:10px; color: var(--text-disabled);">tap a row to select</div>
+            </div>
+
+            <!-- ===================== WIFI INFO ===================== -->
+            <div id="screen-wifiinfo" class="screen">
+                <div class="title-stripe" style="left:5px; top:5px; width:60px; background:#00968C;">WIFI</div>
+                <div class="gfx-btn btn-close-x" onclick="goBack('screen-main')">X</div>
+
+                <div class="gfx-text" style="left:20px; top:46px; color: var(--text-disabled); font-size:11px;">Status:</div>
+                <div id="wi-status" class="gfx-text" style="right:15px; top:46px; color:#FF0000; font-size:11px;">DISCONNECTED</div>
+
+                <div class="gfx-text" style="left:20px; top:68px; color: var(--text-disabled); font-size:11px;">IP:</div>
+                <div id="wi-ip" class="gfx-text" style="right:15px; top:68px; color: var(--text-primary); font-size:11px;">—</div>
+
+                <div class="gfx-text" style="left:20px; top:90px; color: var(--text-disabled); font-size:11px;">SSID:</div>
+                <div id="wi-ssid" class="gfx-text" style="right:15px; top:90px; color: var(--accent-green); font-size:11px;">—</div>
+
+                <div class="gfx-text" style="left:20px; top:112px; color: var(--text-disabled); font-size:11px;">Signal (RSSI):</div>
+                <div id="wi-rssi" class="gfx-text" style="right:15px; top:112px; color: var(--text-disabled); font-size:11px;">—</div>
+
+                <div class="gfx-text" style="left:20px; top:134px; color: var(--text-disabled); font-size:11px;">Latency:</div>
+                <div id="wi-latency" class="gfx-text" style="right:15px; top:134px; color: var(--text-disabled); font-size:11px;">—</div>
+
+                <div class="gfx-text" style="left:20px; top:156px; color: var(--text-disabled); font-size:11px;">Packets/s:</div>
+                <div id="wi-pps" class="gfx-text" style="right:15px; top:156px; color: var(--text-disabled); font-size:11px;">—</div>
+
+                <div style="position:absolute; left:10px; top:178px; width:220px; height:1px; background:#303030;"></div>
+
+                <!-- Manual reconnect (override auto-reconnect timer immediately) -->
+                <div class="gfx-btn"
+                     style="left:10px; top:186px; width:105px; height:38px; background:#00968C; font-size:11px;"
+                     onclick="connectWifi()">RECONNECT</div>
+                <!-- Intentional disconnect (stops auto-reconnect) -->
+                <div class="gfx-btn"
+                     style="left:125px; top:186px; width:105px; height:38px; background:#780000; font-size:11px;"
+                     onclick="disconnectWifi()">DISCONNECT</div>
+
+                <!-- IP input for changing target device -->
+                <div class="gfx-text" style="left:20px; top:240px; color: var(--text-disabled); font-size:10px;">Target IP (edit above &amp; RECONNECT)</div>
+            </div>
+
+            <!-- ===================== CONFIRM MODAL ===================== -->
+            <div id="confirm-modal" style="display:none; position:absolute; top:0; left:0;
+                 width:240px; height:320px; background:rgba(0,0,0,0.93); z-index:200;
+                 flex-direction:column; align-items:center; justify-content:center;">
+                <div style="color:#FF6600; font-size:15px; font-weight:bold; margin-bottom:12px;
+                     letter-spacing:1px;">⚠ CONFIRM</div>
+                <div id="confirm-msg" style="color: var(--text-primary); font-size:11px; text-align:center;
+                     line-height:1.6; margin-bottom:24px; padding:0 18px;"></div>
+                <div style="display:flex; gap:12px;">
+                    <!-- Cancel is LEFT (safe default), Confirm is RIGHT (explicit choice).
+                         position:relative overrides .gfx-btn's default `position:absolute`
+                         (used by display-pixel-positioned buttons), so flex actually
+                         lays these two out side-by-side instead of stacking at (0,0). -->
+                    <div id="confirm-no" class="gfx-btn"
+                         style="position:relative; width:95px; height:44px; background:#303030; border:1px solid #787878; font-size:12px;">PLZ NO</div>
+                    <div id="confirm-yes" class="gfx-btn"
+                         style="position:relative; width:95px; height:44px; background:#780000; border:1px solid #FF6600; font-size:12px;">YES, DO IT</div>
+                </div>
+            </div>
+
+        </div><!-- end ili9341-display -->
+
+        <!-- patched3: bottom row pairs connection-status text (left) with the
+             physical-LED mirror (right).  Flex layout guarantees the LED is
+             visible regardless of how the scaled display is positioned. -->
+        <div id="bezel-bottom-row">
+            <div id="connection-status" style="font-family: monospace; color: var(--text-disabled);">WiFi: DISCONNECTED</div>
+            <div id="bezel-trigger-led" title="Camera trigger LED (mirrors A3 active-low)"></div>
+        </div>
+    </div><!-- end hardware-bezel -->
+    </div><!-- end bezel-scroller -->
+
+    <script>
+    // ─────────────────────────────────────────────────────────────────────────
+    // STATE
+    // ─────────────────────────────────────────────────────────────────────────
+    let state = {
+        screen: 'screen-main',
+        obj: 3,               // 1=5x 2=10x 3=20x
+        stackSelMode: 0,      // 0=step 1=imgs
+        stepIndex: 2,
+        imgs: 128,
+        secStep: 3.3,
+        brightness: 128,      // 1-255
+        ledEnabled: false,
+        ledDuty: 32,          // 0-127
+        trigger: false,       // patched3: shutter active (mirrors firmware shutterActive)
+        sensorSleeping: false,
+        highReflMode: false,
+        dimMs: 120000,        // 2 min
+        sleepMs: 300000,      // 5 min
+        themeIndex: 0,
+        tintPct: 50,          // 0-100
+        calSel: 0,            // 0=photoWidth 1=demarcDist 2=calPoints
+        photoWidth: 6960,
+        demarcDist: 0.40,
+        calPoints: 10,
+        calRunPx: 1920,
+        calPointsCaptured: 0,
+        capturedPoints: [],
+        btConnected: false,
+        // Calibration fit results (filled from device telemetry)
+        fovSlope: null, fovIntercept: null, calibError: null, calibR2: null,
+        // Sensor live readings
+        sensorSignal: null, sensorAmbient: null, sensorStatusCode: null,
+        // Memory (filled from device telemetry)
+        freeHeap: null, totalHeap: null, lowestFree: null, spriteKB: null, cpu: 240,
+        // About / build info (fallbacks shown until device connects and overrides)
+        buildDate: '—', buildTime: '—', sketchKB: null, freeFlashKB: null,
+        sourceLines: 3866, chipInfo: 'ESP32-S3',
+        // WiFi info
+        wifiSSID: null, wifiRSSI: null,
+        // isCustomCalib flag (false = factory defaults shown)
+        isCustomCalib: false,
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FACTORY CALIBRATION CONSTANTS (from AutoFOV_V11_patched2.ino)
+    // DEFAULT_CTRL_X = -0.005, DEFAULT_CTRL_Y = 1.5688, DEFAULT_CALIB_ERROR = 0.0146
+    // CALIB_R2 = 0.994 (empirically verified factory default)
+    // ─────────────────────────────────────────────────────────────────────────
+    const FACTORY_DIST = [14.4714,24.3,35.0833,43.7738,52.8659,64.4868,74.4321,
+                          84.7711,93.494,104.0241,112.8095,123.8554,69.0143];
+    const FACTORY_FOV  = [1.5255,1.4538,1.3927,1.3430,1.2955,1.2351,1.1923,
+                          1.1340,1.0978,1.0590,1.0224,0.9738,1.2157];
+    const FACTORY_POINTS = FACTORY_DIST.map((d, i) => ({ dist: d, fov: FACTORY_FOV[i] }));
+
+    // Pre-load factory defaults into state so FOV info and graph show real data immediately
+    state.fovSlope     = -0.005;
+    state.fovIntercept =  1.5688;
+    state.calibError   =  0.0146;
+    state.calibR2      =  0.994;
+    state.calGraphPoints = FACTORY_POINTS.slice(); // copy — overwritten when device sends custom
+
+    const STEP_TABLE = [
+        0.156, 0.312, 0.468, 0.625, 0.781, 0.937, 1.093, 1.250,
+        1.406, 1.562, 1.718, 1.875, 2.031, 2.187, 2.344, 2.500,
+        2.656, 2.812, 2.968, 3.125, 3.281, 3.437, 3.593
+    ];
+    const NA_TABLE  = { 1: 0.14, 2: 0.28, 3: 0.42 };
+    const OBJ_LABEL = { 1: '5x',  2: '10x', 3: '20x' };
+
+    // Objective button colors (exact firmware colors converted from RGB565)
+    const MUTED = { 1: '#500000', 2: '#003800', 3: '#000050' };
+    const ACTIVE = { 1: '#F80000', 2: '#00A800', 3: '#0000F8' };
+
+    const DIM_STEP   = 30000;   const DIM_MIN   = 30000;   const DIM_MAX   = 1800000;
+    const SLEEP_STEP = 60000;   const SLEEP_MIN = 60000;   const SLEEP_MAX = 3600000;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SCREEN NAVIGATION
+    // ─────────────────────────────────────────────────────────────────────────
+    let screenHistory = [];
+
+    function switchScreen(id) {
+        screenHistory.push(state.screen);
+        _showScreen(id);
+    }
+
+    function goBack(fallback) {
+        const prev = screenHistory.pop() || fallback;
+        _showScreen(prev);
+    }
+
+    function _showScreen(id) {
+        document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+        state.screen = id;
+        // patched3: re-evaluate the sphere visibility (it only shows on MAIN).
+        if (typeof applyTriggerVisuals === 'function') applyTriggerVisuals();
+        if (id === 'screen-stackcalc')   updateStackCalcUI();
+        if (id === 'screen-stacktime')   updateStackTimeUI();
+        if (id === 'screen-calsettings') updateCalSettingsUI();
+        if (id === 'screen-brightness')  updateBrightnessUI();
+        if (id === 'screen-settings')    updateSettingsUI();
+        if (id === 'screen-timeout')     updateTimeoutUI();
+        if (id === 'screen-wifiinfo')    updateWifiInfoUI();
+        if (id === 'screen-sensorinfo')  refreshSensorInfoUI();
+        if (id === 'screen-btinfo')      updateBtInfoUI(state.btConnected);
+        if (id === 'screen-fovinfo')     updateFovInfoUI();
+        if (id === 'screen-calgraph')    { updateFovInfoUI(); drawCalGraph(); }
+        if (id === 'screen-memory')      updateMemoryUI();
+        if (id === 'screen-about')       updateAboutUI();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // OBJECTIVE BUTTONS
+    // ─────────────────────────────────────────────────────────────────────────
+    function applyObjective(id) {
+        state.obj = id;
+        [1, 2, 3].forEach(i => {
+            const b = document.getElementById('btn-obj-' + i);
+            b.classList.remove('active');
+            b.style.backgroundColor = MUTED[i];
+        });
+        const active = document.getElementById('btn-obj-' + id);
+        active.classList.add('active');
+        active.style.backgroundColor = ACTIVE[id];
+    }
+    function setObjective(id) {
+        applyObjective(id);
+        sendCommand('obj', id);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STACK CALC
+    // ─────────────────────────────────────────────────────────────────────────
+    function setStackSel(mode) { state.stackSelMode = mode; updateStackCalcUI(); }
+
+    function adjStack(adj) {
+        if (state.stackSelMode === 0) {
+            const delta = Math.abs(adj) >= 2 ? Math.sign(adj) * 2 : Math.sign(adj);
+            state.stepIndex = Math.max(0, Math.min(STEP_TABLE.length - 1, state.stepIndex + delta));
+            sendCommand('stepIndex', state.stepIndex);
+        } else {
+            const delta = Math.abs(adj) >= 2 ? Math.sign(adj) * 10 : Math.sign(adj);
+            state.imgs = Math.max(2, Math.min(50000, state.imgs + delta));
+            sendCommand('imgs', state.imgs);
+        }
+        updateStackCalcUI();
+    }
+
+    function updateStackCalcUI() {
+        document.getElementById('val-calc-obj').innerText = 'OBJ: ' + OBJ_LABEL[state.obj];
+        document.getElementById('lbl-step').style.color = state.stackSelMode === 0 ? '#ADFF2F' : '#FFF';
+        document.getElementById('lbl-imgs').style.color = state.stackSelMode === 1 ? '#A800F8' : '#FFF';
+
+        const stepVal = STEP_TABLE[state.stepIndex];
+        document.getElementById('val-step').innerText = stepVal.toFixed(3) + ' um';
+        document.getElementById('val-imgs').innerText = state.imgs;
+
+        const NA = NA_TABLE[state.obj];
+        const dof = 0.55 / (NA * NA);
+        const depth = (state.imgs - 1) * stepVal;
+        const overlap = ((dof - stepVal) / dof) * 100;
+
+        document.getElementById('val-dof').innerText   = 'DOF: ' + dof.toFixed(3) + ' um';
+        document.getElementById('val-depth').innerText = 'Stack Depth: ' + depth.toFixed(1) + ' um';
+        const olEl = document.getElementById('val-overlap');
+        olEl.innerText    = 'Overlap: ' + overlap.toFixed(0) + '%';
+        olEl.style.color  = overlap < 0 ? '#FF0000' : overlap < 30 ? '#FFA500' : '#00FF00';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STACK TIME
+    // ─────────────────────────────────────────────────────────────────────────
+    function adjTime(adj) {
+        const step = Math.abs(adj) >= 2 ? 1.0 : 0.1;
+        state.secStep = Math.max(0.1, Math.min(60.0, +(state.secStep + Math.sign(adj) * step).toFixed(1)));
+        sendCommand('secStep', state.secStep);
+        updateStackTimeUI();
+    }
+
+    function updateStackTimeUI() {
+        const stepVal = STEP_TABLE[state.stepIndex];
+        const depth   = (state.imgs - 1) * stepVal;
+        document.getElementById('time-val-step').innerText  = stepVal.toFixed(3);
+        document.getElementById('time-val-depth').innerText = depth.toFixed(1);
+        document.getElementById('time-val-imgs').innerText  = state.imgs;
+        document.getElementById('val-secstep').innerText    = state.secStep.toFixed(1) + ' s';
+
+        let total = Math.round(state.imgs * state.secStep);
+        const h = Math.floor(total / 3600); total %= 3600;
+        const m = Math.floor(total / 60);
+        const s = total % 60;
+        document.getElementById('val-totaltime').innerText =
+            h > 0 ? `${h}h ${m}m ${s}s` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CALIBRATOR SETTINGS
+    // ─────────────────────────────────────────────────────────────────────────
+    function setCalSel(sel) {
+        state.calSel = sel;
+        updateCalSettingsUI();
+    }
+
+    function adjCal(adj) {
+        const bigDelta = Math.abs(adj) >= 2;
+        const dir = Math.sign(adj);
+        if (state.calSel === 0) {
+            const step = bigDelta ? 100 : 10;
+            state.photoWidth = Math.max(100, Math.min(30000, state.photoWidth + dir * step));
+        } else if (state.calSel === 1) {
+            const step = bigDelta ? 0.1 : 0.01;
+            state.demarcDist = Math.max(0.01, Math.min(5.0, +(state.demarcDist + dir * step).toFixed(2)));
+        } else {
+            const step = bigDelta ? 5 : 1;
+            state.calPoints = Math.max(3, Math.min(50, state.calPoints + dir * step));
+        }
+        updateCalSettingsUI();
+        sendCommand(state.calSel === 0 ? 'calWidth' : state.calSel === 1 ? 'demarcDist' : 'calPoints',
+                    [state.photoWidth, state.demarcDist, state.calPoints][state.calSel]);
+    }
+
+    function updateCalSettingsUI() {
+        const sel = state.calSel;
+        document.getElementById('lbl-calw').style.color = sel === 0 ? '#ADFF2F' : '#FFF';
+        document.getElementById('lbl-cald').style.color = sel === 1 ? '#ADFF2F' : '#FFF';
+        document.getElementById('lbl-caln').style.color = sel === 2 ? '#ADFF2F' : '#FFF';
+        document.getElementById('val-calw').innerText = state.photoWidth + ' px';
+        document.getElementById('val-cald').innerText = state.demarcDist.toFixed(2) + ' mm';
+        document.getElementById('val-caln').innerText = state.calPoints;
+    }
+
+    function startCal() {
+        state.calRunPx = 1920;
+        state.calPointsCaptured = 0;
+        state.capturedPoints = [];
+        sendCommand('calStart', 1);   // patched3: clears any stale pointsCaptured on ESP32
+        updateCalRunUI(1);
+        switchScreen('screen-calrun');
+    }
+
+    function resetAll() {
+        showConfirm('Reset ALL calibration data?\nThis cannot be undone.', () => {
+            const btn = document.getElementById('btn-reset-all');
+            btn.innerText = 'RESETTING…';
+            setTimeout(() => { btn.innerText = 'RESET ALL'; }, 800);
+            sendCommand('resetAll', 1);
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CAL RUN
+    // ─────────────────────────────────────────────────────────────────────────
+    function updateCalRunUI(ptNum) {
+        document.getElementById('calrun-pt').innerText     = ptNum;
+        document.getElementById('calrun-total').innerText  = state.calPoints;
+        document.getElementById('calrun-pixels').innerText = state.calRunPx + ' px';
+        document.getElementById('calrun-status').innerText = '';
+        const hasPoints = state.calPointsCaptured > 0;
+        const rev = document.getElementById('btn-review');
+        rev.style.background = hasPoints ? '#008894' : '#101010';
+        rev.style.color      = hasPoints ? '#FFF'    : '#787878';
+    }
+
+    function adjCalRun(adj) {
+        const big = Math.abs(adj) >= 2;
+        const step = big ? 100 : 10;
+        state.calRunPx = Math.max(1, state.calRunPx + Math.sign(adj) * step);
+        document.getElementById('calrun-pixels').innerText = state.calRunPx + ' px';
+    }
+
+    let calCapturing = false;
+    function calCaptureSave() {
+        if (calCapturing) return;
+        calCapturing = true;
+        const status = document.getElementById('calrun-status');
+        status.innerText = 'SAMPLING…';
+        setTimeout(() => {
+            calCapturing = false;
+            const ptIdx = state.calPointsCaptured;
+            state.capturedPoints[ptIdx] = { idx: ptIdx + 1, px: state.calRunPx, dist: null, fov: null };
+            state.calPointsCaptured++;
+            status.innerText = 'SAVED pt ' + state.calPointsCaptured;
+            updateCalRunUI(state.calPointsCaptured + 1);
+            if (state.calPointsCaptured >= state.calPoints) {
+                calReview(); // all points done → go straight to review
+            }
+        }, 600);
+        sendCommand('calCapture', state.calRunPx);
+    }
+
+    // ── Cal Review ──────────────────────────────────────────────────────────
+    let calRevOffset = 0;   // scroll offset (rows)
+    let calRevSel    = -1;  // selected row index
+
+    function calReview() {
+        if (state.calPointsCaptured === 0) return;
+        calRevOffset = 0;
+        calRevSel    = -1;
+        switchScreen('screen-calreview');
+        renderCalReview();
+    }
+
+    function renderCalReview() {
+        const ROWS_VISIBLE = 4;
+        const pts  = state.capturedPoints.slice(0, state.calPointsCaptured);
+        const list = document.getElementById('calrev-list');
+        document.getElementById('calrev-count').innerText = pts.length + ' pt' + (pts.length !== 1 ? 's' : '');
+        list.innerHTML = '';
+
+        pts.slice(calRevOffset, calRevOffset + ROWS_VISIBLE).forEach((pt, i) => {
+            const absIdx = calRevOffset + i;
+            const sel    = absIdx === calRevSel;
+            const row    = document.createElement('div');
+            row.style.cssText = `position:relative; width:200px; height:36px; margin-bottom:2px;
+                background:${sel ? '#0000CD' : '#111'}; cursor:pointer; display:flex;
+                align-items:center; padding:0 8px; box-sizing:border-box; border-radius:2px;`;
+            row.innerHTML =
+                `<span style="color: var(--text-disabled); font-size:10px; min-width:22px;">#${pt.idx}</span>` +
+                `<span style="color: var(--text-primary); font-size:11px; flex:1;">${pt.px} px</span>` +
+                `<span style="color:${pt.dist !== null ? '#ADFF2F' : '#404040'}; font-size:10px;">` +
+                `${pt.dist !== null ? pt.dist + ' mm' : 'pending'}</span>`;
+            row.onclick = () => { calRevSel = absIdx; renderCalReview(); };
+            list.appendChild(row);
+        });
+
+        document.getElementById('calrev-up').style.opacity = calRevOffset > 0 ? '1' : '0.3';
+        document.getElementById('calrev-dn').style.opacity = calRevOffset + ROWS_VISIBLE < pts.length ? '1' : '0.3';
+
+        const retake = document.getElementById('btn-retake');
+        retake.style.background = calRevSel >= 0 ? '#0000CD' : '#101010';
+        retake.style.color      = calRevSel >= 0 ? '#FFF'    : '#787878';
+
+        document.getElementById('calrev-sel-hint').innerText =
+            calRevSel >= 0 ? 'pt ' + (calRevSel + 1) + ' selected — tap RETAKE to redo' : 'tap a row to select';
+    }
+
+    function calRevScroll(dir) {
+        const max = Math.max(0, state.calPointsCaptured - 4);
+        calRevOffset = Math.max(0, Math.min(max, calRevOffset + dir));
+        renderCalReview();
+    }
+
+    function calRetake() {
+        if (calRevSel < 0) return;
+        // Remove this point and all after it so the run resumes from here
+        state.capturedPoints.splice(calRevSel);
+        state.calPointsCaptured = calRevSel;
+        state.calRunPx = 1920;
+        updateCalRunUI(calRevSel + 1);
+        goBack('screen-calrun');
+    }
+
+    function calGoBack() {
+        if (state.calPointsCaptured === 0) {
+            goBack('screen-calsettings');
+        } else {
+            // Undo last captured point, stay on calrun at that point number
+            state.calPointsCaptured--;
+            state.capturedPoints.splice(state.calPointsCaptured, 1);
+            state.calRunPx = 1920;
+            updateCalRunUI(state.calPointsCaptured + 1);
+            sendCommand('calUndoPoint', state.calPointsCaptured + 1);
+        }
+    }
+
+    function calCancel() {
+        if (state.calPointsCaptured > 0) {
+            showConfirm('Cancel calibration?\nAll captured points will be lost.', () => {
+                state.calPointsCaptured = 0;
+                switchScreen('screen-main');
+            });
+        } else {
+            switchScreen('screen-main');
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BRIGHTNESS SLIDERS
+    // ─────────────────────────────────────────────────────────────────────────
+    let activeSlider = null;
+
+    function startSlider(e, type) {
+        activeSlider = type;
+        moveSlider(e, type);
+        e.preventDefault();
+    }
+
+    function moveSlider(e, type) {
+        const sliderType = type || activeSlider;
+        if (!sliderType) return;
+        const trackMap = {
+            brightness: document.getElementById('screen-slider') || document.getElementById('settings-slider'),
+            led:        document.getElementById('led-slider'),
+            tint:       document.getElementById('tint-track'),
+        };
+        // Pick the correct track (brightness exists on two screens)
+        let track;
+        if (sliderType === 'brightness') {
+            track = document.getElementById('screen-slider') ||
+                    document.getElementById('settings-slider');
+            // pick whichever is in the active screen
+            const activeScrId = state.screen;
+            if (activeScrId === 'screen-brightness') track = document.getElementById('screen-slider');
+            else track = document.getElementById('settings-slider');
+        } else {
+            track = trackMap[sliderType];
+        }
+        if (!track) return;
+        const rect = track.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+
+        // patched3: throttle slider WS commands to ~10 Hz max.  Each handler
+        // on the firmware side does NVS-write + screen-refresh (~80-100 ms),
+        // and the queue depth is only 16 — without throttling, dragging a
+        // slider for 1 s overflows the queue and ledDuty/brightness values
+        // land out-of-order or get dropped.
+        if (sliderType === 'brightness') {
+            state.brightness = Math.max(1, Math.round(pct * 255));
+            updateBrightnessUI();
+            updateSettingsUI();
+            sendCommandThrottled('brightness', state.brightness);
+        } else if (sliderType === 'led') {
+            if (!state.ledEnabled) return;
+            state.ledDuty = Math.round(pct * 127);
+            updateBrightnessUI();
+            applyTriggerVisuals();   // patched3: rescale bezel-LED brightness live
+            sendCommandThrottled('ledDuty', state.ledDuty);
+        } else if (sliderType === 'tint') {
+            state.tintPct = Math.round(pct * 100);
+            updateTimeoutUI();
+            sendCommandThrottled('tint', state.tintPct);
+        }
+    }
+
+    // patched3: per-key throttle.  Records the last send time per key; if
+    // a new value comes in within 100 ms of the last send, store as pending
+    // and schedule a flush.  Guarantees the final value always lands.
+    const _sendThrottleLast = {};
+    const _sendThrottlePending = {};
+    const _sendThrottleTimer = {};
+    function sendCommandThrottled(key, val) {
+        const now = Date.now();
+        const lastT = _sendThrottleLast[key] || 0;
+        if (now - lastT >= 100) {
+            _sendThrottleLast[key] = now;
+            delete _sendThrottlePending[key];
+            sendCommand(key, val);
+        } else {
+            _sendThrottlePending[key] = val;
+            if (!_sendThrottleTimer[key]) {
+                _sendThrottleTimer[key] = setTimeout(() => {
+                    _sendThrottleTimer[key] = null;
+                    if (_sendThrottlePending[key] !== undefined) {
+                        _sendThrottleLast[key] = Date.now();
+                        sendCommand(key, _sendThrottlePending[key]);
+                        delete _sendThrottlePending[key];
+                    }
+                }, 100 - (now - lastT));
+            }
+        }
+    }
+
+    document.addEventListener('mousemove', e => { if (activeSlider) moveSlider(e); });
+    document.addEventListener('mouseup',   () => { activeSlider = null; });
+    document.addEventListener('touchmove', e => { if (activeSlider) { e.preventDefault(); moveSlider(e); } }, { passive: false });
+    document.addEventListener('touchend',  () => { activeSlider = null; });
+
+    function updateSettingsUI() {
+        const pct = Math.round(state.brightness / 255 * 100);
+        const w   = pct + '%';
+        document.getElementById('settings-bright-pct').innerText  = pct + '%';
+        document.getElementById('settings-slider-fill').style.width = w;
+        document.getElementById('settings-slider-thumb').style.left = w;
+    }
+
+    function updateBrightnessUI() {
+        const sPct = Math.round(state.brightness / 255 * 100);
+        const lPct = Math.round(state.ledDuty / 127 * 100);
+        const sw   = sPct + '%';
+        const lw   = lPct + '%';
+
+        document.getElementById('bright-screen-pct').innerText  = sPct + '%';
+        document.getElementById('screen-slider-fill').style.width = sw;
+        document.getElementById('screen-slider-thumb').style.left = sw;
+
+        document.getElementById('bright-led-pct').innerText     = state.ledEnabled ? lPct + '%' : '--';
+        document.getElementById('bright-led-pct').style.color   = state.ledEnabled ? '#A800F8' : '#787878';
+
+        const fill  = document.getElementById('led-slider-fill');
+        const thumb = document.getElementById('led-slider-thumb');
+        const tog   = document.getElementById('btn-led-toggle');
+
+        if (state.ledEnabled) {
+            fill.style.background  = '#A800F8';
+            fill.style.width       = lw;
+            thumb.style.left       = lw;
+            thumb.style.display    = 'block';
+            tog.innerText          = 'ON';
+            tog.style.background   = '#00FF00';
+            tog.style.color        = '#000';
+        } else {
+            fill.style.background  = '#333';
+            fill.style.width       = '100%';
+            thumb.style.display    = 'none';
+            tog.innerText          = 'OFF';
+            tog.style.background   = '#780000';
+            tog.style.color        = '#FFF';
+        }
+    }
+
+    function toggleLed() {
+        // patched3: send command FIRST so a UI-refresh exception can't block
+        // the firmware update path.
+        state.ledEnabled = !state.ledEnabled;
+        sendCommand('ledEnabled', state.ledEnabled ? 1 : 0);
+        try { updateBrightnessUI();   } catch (e) { console.warn('updateBrightnessUI threw:', e); }
+        try { applyTriggerVisuals(); } catch (e) { console.warn('applyTriggerVisuals threw:', e); }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SCREEN TIMEOUT + THEMES
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // patched3: theme switching is now driven by a body class that toggles
+    // the CSS variables declared at the top of <style>.  No JS-side hex array
+    // — bg / text / accent tokens all live in CSS for single-source-of-truth.
+    const THEME_CLASSES = ['theme-classic', 'theme-midnight', 'theme-forest', 'theme-daylight'];
+
+    function adjTimeout(type, dir) {
+        if (type === 'dim') {
+            state.dimMs = Math.max(DIM_MIN, Math.min(DIM_MAX, state.dimMs + dir * DIM_STEP));
+            if (state.dimMs >= state.sleepMs) state.sleepMs = state.dimMs + SLEEP_STEP;
+        } else {
+            state.sleepMs = Math.max(SLEEP_MIN, Math.min(SLEEP_MAX, state.sleepMs + dir * SLEEP_STEP));
+            if (state.sleepMs <= state.dimMs) state.dimMs = Math.max(DIM_MIN, state.sleepMs - DIM_STEP);
+        }
+        sendCommand('dimMs', state.dimMs);
+        sendCommand('sleepMs', state.sleepMs);
+        updateTimeoutUI();
+    }
+
+    // applyTheme = visual only.  Called both by incoming device state (via
+    // applyFullState) and by INIT — neither must echo a command back.
+    // CRITICAL: applyFullState pushes `theme` on EVERY device-side settings
+    // change, so if applyTheme sent a command here it would bounce back to the
+    // device, trip displayNeedsRedraw, and force a full-screen redraw — the
+    // flicker seen after every device button press.  setTheme() is the
+    // user-click wrapper that actually sends the command.
+    function applyTheme(idx) {
+        state.themeIndex = idx;
+        // Swap body class — flips every --display-bg / --text-* / --accent-*
+        // CSS variable in one shot; the entire display preview repaints.
+        document.body.classList.remove(...THEME_CLASSES);
+        document.body.classList.add(THEME_CLASSES[idx] || THEME_CLASSES[0]);
+        // Swatch active-border indicator
+        document.querySelectorAll('.theme-swatch').forEach((el, i) => {
+            el.classList.toggle('active', i === idx);
+        });
+        // Re-apply tint brightness (filter survives the class swap but cheap)
+        _applyTintBrightness();
+    }
+
+    function setTheme(idx) {
+        applyTheme(idx);
+        sendCommand('theme', idx);
+    }
+
+    function _applyTintBrightness() {
+        // tintPct 0-100 maps to CSS brightness 0.55 (dim) → 1.45 (vivid)
+        // Centre (50%) = normal (1.0)
+        const brightness = 0.55 + (state.tintPct / 100) * 0.9;
+        document.getElementById('ili9341-display').style.filter =
+            `brightness(${brightness.toFixed(2)})`;
+    }
+
+    function fmtMs(ms) {
+        const s = Math.round(ms / 1000);
+        const m = Math.floor(s / 60);
+        const r = s % 60;
+        return m === 0 ? r + 's' : r === 0 ? m + 'm' : m + 'm ' + r + 's';
+    }
+
+    function updateTimeoutUI() {
+        document.getElementById('val-dim').innerText   = fmtMs(state.dimMs);
+        document.getElementById('val-sleep').innerText = fmtMs(state.sleepMs);
+        const pct = state.tintPct + '%';
+        document.getElementById('tint-fill').style.width = pct;
+        _applyTintBrightness();   // live preview as slider is dragged
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SHUTTER TRIGGER VISUALS (patched3)
+    //   sphere — only meaningful on MAIN; mirrors firmware which only draws
+    //            the on-screen circle when currentMode == MAIN.
+    //   bezelLed — fires regardless of screen mode (firmware drives the
+    //              physical LED on every active trigger), but visually
+    //              dimmed/inert when ledEnabled is false.
+    // ─────────────────────────────────────────────────────────────────────────
+    function applyTriggerVisuals() {
+        const sphere   = document.getElementById('shutter-sphere');
+        const bezelLed = document.getElementById('bezel-trigger-led');
+        if (!sphere || !bezelLed) return;
+        const onMain   = (state.screen === 'screen-main');
+        const enabled  = !!state.ledEnabled;
+        const firing   = !!state.trigger;
+        // ledDuty range matches the firmware: 0..127.  Normalize to 0..1.
+        const dutyPct  = Math.max(0, Math.min(1, (state.ledDuty || 0) / 127));
+
+        // The in-display sphere doesn't scale brightness — only on/off.
+        sphere.classList.toggle('firing', firing && onMain);
+
+        let bg, glow;
+        if (firing && enabled) {
+            // Trigger active — white-cored bright green with strong outer glow
+            bg   = 'radial-gradient(circle at 35% 28%, #FFFFFF 0%, #80FF40 30%, #20C020 65%, #105010 100%)';
+            glow = '0 0 22px rgba(80, 255, 80, 0.95),'
+                 + '0 0  8px rgba(220, 255, 220, 0.85),'
+                 + 'inset 0 1px 2px rgba(0,0,0,0.4)';
+        } else if (!enabled) {
+            // LED disabled — red dome, no glow.  Clearly "off / inhibited".
+            bg   = 'radial-gradient(circle at 35% 28%, #FF6060 0%, #B00000 45%, #500000 100%)';
+            glow = 'inset 0 1px 2px rgba(0,0,0,0.6)';
+        } else {
+            // Enabled, idle — green brightness scales with ledDuty.
+            //   duty=0   → very dark green (#0A1A0A core)
+            //   duty=1   → bright pure green (#80FF80 core)
+            // Interpolation is linear per channel.  Glow scales the same way.
+            const coreR = Math.round(10 + dutyPct * 118);   //  10 → 128
+            const coreG = Math.round(30 + dutyPct * 225);   //  30 → 255
+            const midR  = Math.round( 5 + dutyPct *  20);   //   5 →  25
+            const midG  = Math.round(20 + dutyPct * 200);   //  20 → 220
+            const outR  = Math.round( 2 + dutyPct *   8);   //   2 →  10
+            const outG  = Math.round( 8 + dutyPct *  82);   //   8 →  90
+            bg = 'radial-gradient(circle at 35% 28%, '
+               + 'rgb(' + coreR + ',' + coreG + ',' + coreR + ') 0%, '
+               + 'rgb(' + midR  + ',' + midG  + ',' + midR  + ') 50%, '
+               + 'rgb(' + outR  + ',' + outG  + ',' + outR  + ') 100%)';
+            const glowSize  = Math.round(2 + dutyPct * 10);
+            const glowAlpha = (0.15 + dutyPct * 0.55).toFixed(2);
+            glow = '0 0 ' + glowSize + 'px rgba(0, 255, 0, ' + glowAlpha + '),'
+                 + 'inset 0 1px 2px rgba(0,0,0,0.6)';
+        }
+        bezelLed.style.background = bg;
+        bezelLed.style.boxShadow  = glow;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TOF SENSOR TOGGLES + REFRESH
+    // ─────────────────────────────────────────────────────────────────────────
+    function refreshSensorInfoUI() {
+        // patched3: tolerate undefined fields — the loose `!== null` checks
+        // used to be the silent-throw culprit when state.sensorSignal was
+        // never set (undefined !== null is true, then .toFixed crashes).
+        const tog = document.getElementById('btn-sensor-toggle');
+        if (tog) {
+            tog.innerText        = state.sensorSleeping ? 'WAKE SENSOR' : 'SLEEP SENSOR';
+            tog.style.background = state.sensorSleeping ? '#006400' : '#780000';
+        }
+        const hr = document.getElementById('btn-sensor-hiref');
+        if (hr) {
+            hr.innerText        = state.highReflMode ? 'HIGH REFLECTIVITY: ON' : 'HIGH REFLECTIVITY: OFF';
+            hr.style.background = state.highReflMode ? '#006800' : '#787878';
+        }
+        const sigEl = document.getElementById('sensor-signal');
+        if (sigEl) {
+            const v = state.sensorSignal;
+            sigEl.innerText = (typeof v === 'number') ? v.toFixed(1) + ' Mcps' : '—';
+        }
+        const ambEl = document.getElementById('sensor-ambient');
+        if (ambEl) {
+            const v = state.sensorAmbient;
+            ambEl.innerText = (typeof v === 'number') ? v.toFixed(2) + ' Mcps' : '—';
+        }
+        const stEl = document.getElementById('sensor-status');
+        if (stEl) {
+            const code = state.sensorStatusCode;
+            if (typeof code === 'number') {
+                const ok = code === 0 || code === 3 || code === 6;
+                stEl.innerText   = (ok ? 'OK (' : 'ERR (') + code + ')';
+                stEl.style.color = ok ? '#00FF00' : '#FF0000';
+            } else {
+                stEl.innerText   = '—';
+                stEl.style.color = '#787878';
+            }
+        }
+    }
+
+    function toggleSensor() {
+        // patched3: send command FIRST so a UI-refresh exception can't block
+        // the firmware update path.  Wrap the refresh in try/catch for the
+        // same reason — undefined sensorSignal/etc. used to throw silently.
+        state.sensorSleeping = !state.sensorSleeping;
+        sendCommand('sensorSleep', state.sensorSleeping ? 1 : 0);
+        try { refreshSensorInfoUI(); } catch (e) { console.warn('refreshSensorInfoUI threw:', e); }
+    }
+
+    function toggleHighRefl() {
+        state.highReflMode = !state.highReflMode;
+        refreshSensorInfoUI();
+        sendCommand('highRefl', state.highReflMode ? 1 : 0);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FOV INFO / CAL GRAPH REFRESH
+    // ─────────────────────────────────────────────────────────────────────────
+    function updateFovInfoUI() {
+        const slope = state.fovSlope, intc = state.fovIntercept;
+        const err   = state.calibError, r2  = state.calibR2;
+        const isCustom = state.isCustomCalib;
+        const g = (id) => document.getElementById(id);
+
+        const stEl = g('fovinfo-status');
+        if (stEl) { stEl.innerText = 'Status: ' + (isCustom ? 'CUSTOM CAL' : 'FACTORY DEFAULT'); stEl.style.color = isCustom ? '#ADFF2F' : '#FFA500'; }
+        if (g('fovinfo-slope'))     g('fovinfo-slope').innerText     = slope !== null ? slope.toFixed(5)        : '—';
+        if (g('fovinfo-intercept')) g('fovinfo-intercept').innerText = intc  !== null ? intc.toFixed(4)         : '—';
+        if (g('fovinfo-err'))  { g('fovinfo-err').innerText  = err !== null ? err.toFixed(4) + ' mm' : '—';
+                                  g('fovinfo-err').style.color = err !== null ? (err < 0.05 ? '#00FF00' : '#FFA500') : '#787878'; }
+        if (g('fovinfo-r2'))   { g('fovinfo-r2').innerText   = r2  !== null ? r2.toFixed(3)          : '—';
+                                  g('fovinfo-r2').style.color  = r2  !== null ? (r2  > 0.99 ? '#00FF00' : '#FFA500') : '#787878'; }
+        if (g('fovinfo-photowidth')) g('fovinfo-photowidth').innerText = state.photoWidth + ' px';
+        // sync cal graph legend
+        if (g('calgraph-r2'))        g('calgraph-r2').innerText        = r2    !== null ? r2.toFixed(3)    : '—';
+        if (g('calgraph-slope'))     g('calgraph-slope').innerText     = slope !== null ? slope.toFixed(5) : '—';
+        if (g('calgraph-intercept')) g('calgraph-intercept').innerText = intc  !== null ? intc.toFixed(4)  : '—';
+        if (g('calgraph-rmse'))      g('calgraph-rmse').innerText      = err   !== null ? err.toFixed(4)   : '—';
+        // redraw canvas if it's the active screen
+        if (state.screen === 'screen-calgraph') drawCalGraph();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MEMORY SCREEN REFRESH
+    // ─────────────────────────────────────────────────────────────────────────
+    function updateMemoryUI() {
+        const g = (id) => document.getElementById(id);
+        if (g('mem-free-heap'))  g('mem-free-heap').innerText   = state.freeHeap   !== null ? state.freeHeap   + ' KB' : '—';
+        if (g('mem-total-heap')) g('mem-total-heap').innerText  = state.totalHeap  !== null ? state.totalHeap  + ' KB' : '—';
+        if (g('mem-lowest-free'))g('mem-lowest-free').innerText = state.lowestFree !== null ? state.lowestFree + ' KB' : '—';
+        if (g('mem-sprites'))    g('mem-sprites').innerText     = state.spriteKB   !== null ? state.spriteKB   + ' KB' : '—';
+        if (g('mem-psram-free')) g('mem-psram-free').innerText  = state.psramFree  !== undefined ? state.psramFree  + ' KB' : '—';
+        if (g('mem-psram-total'))g('mem-psram-total').innerText = state.psramTotal !== undefined ? state.psramTotal + ' KB' : '—';
+        if (g('mem-cpu'))        g('mem-cpu').innerText         = state.cpu + ' MHz';
+        if (g('mem-sdk'))        g('mem-sdk').innerText         = state.sdk || '—';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ABOUT SCREEN REFRESH
+    // ─────────────────────────────────────────────────────────────────────────
+    function updateAboutUI() {
+        const g = (id) => document.getElementById(id);
+        if (g('about-built'))     g('about-built').innerText     = state.buildDate   || '—';
+        if (g('about-time'))      g('about-time').innerText      = state.buildTime   || '—';
+        if (g('about-sketch'))    g('about-sketch').innerText    = state.sketchKB    !== null ? state.sketchKB    + ' KB' : '—';
+        if (g('about-freeflash')) g('about-freeflash').innerText = state.freeFlashKB !== null ? state.freeFlashKB + ' KB' : '—';
+        if (g('about-lines'))     g('about-lines').innerText     = state.sourceLines !== null ? '~' + state.sourceLines + ' lines' : '—';
+        if (g('about-chip'))      g('about-chip').innerText      = state.chipInfo    || '—';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CALIBRATION SCATTER GRAPH (canvas render)
+    // ─────────────────────────────────────────────────────────────────────────
+    function drawCalGraph() {
+        const canvas = document.getElementById('cal-canvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        // Canvas is 376×482 buffer displayed at 188×241 CSS (2× for the outer transform).
+        // All sizes below are in canvas-buffer pixels.
+        const CW = 376, CH = 482;
+        ctx.clearRect(0, 0, CW, CH);
+
+        const pts   = state.calGraphPoints || FACTORY_POINTS;
+        const slope = state.fovSlope     ?? -0.005;
+        const intc  = state.fovIntercept ?? 1.5688;
+        const rmse  = state.calibError   ?? 0.0146;
+
+        if (!pts || pts.length < 2) {
+            ctx.fillStyle = '#787878'; ctx.font = 'bold 22px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('No data', CW / 2, CH / 2); return;
+        }
+
+        // ── Plot margins (canvas pixels) ──
+        const ML = 56, MR = 12, MT = 10, MB = 38;
+        const PW = CW - ML - MR;   // plot width  = 308
+        const PH = CH - MT - MB;   // plot height = 434
+
+        // ── Data ranges with 5% padding ──
+        const xVals = pts.map(p => p.dist), yVals = pts.map(p => p.fov);
+        const xMin = Math.min(...xVals), xMax = Math.max(...xVals);
+        const yMin = Math.min(...yVals), yMax = Math.max(...yVals);
+        const xPad = (xMax - xMin) * 0.05 || 5;
+        const yPad = (yMax - yMin) * 0.08 || 0.05;
+        const xa = xMin - xPad, xb = xMax + xPad;
+        const ya = yMin - yPad, yb = yMax + yPad;
+
+        // ── Coordinate helpers ──
+        const toX = x => ML + ((x - xa) / (xb - xa)) * PW;
+        const toY = y => MT + PH - ((y - ya) / (yb - ya)) * PH;
+
+        // ── Background of plot area ──
+        ctx.fillStyle = '#050505';
+        ctx.fillRect(ML, MT, PW, PH);
+
+        // ── Subtle grid lines (4 divisions each axis) ──
+        ctx.strokeStyle = '#1e1e1e'; ctx.lineWidth = 1;
+        for (let i = 1; i <= 3; i++) {
+            const gx = ML + PW * i / 4;
+            ctx.beginPath(); ctx.moveTo(gx, MT); ctx.lineTo(gx, MT + PH); ctx.stroke();
+            const gy = MT + PH * i / 4;
+            ctx.beginPath(); ctx.moveTo(ML, gy); ctx.lineTo(ML + PW, gy); ctx.stroke();
+        }
+
+        // ── Axis lines ──
+        ctx.strokeStyle = '#787878'; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(ML, MT); ctx.lineTo(ML, MT + PH);     // Y-axis
+        ctx.moveTo(ML, MT + PH); ctx.lineTo(ML + PW, MT + PH); // X-axis
+        ctx.stroke();
+
+        // ── Tick marks + labels ──
+        const N_TICKS = 4;
+        ctx.fillStyle  = '#909090';
+        ctx.strokeStyle= '#787878';
+        ctx.lineWidth  = 1;
+        ctx.font       = '18px "Courier New", monospace';
+
+        // X ticks
+        ctx.textAlign  = 'center';
+        ctx.textBaseline = 'top';
+        for (let i = 0; i <= N_TICKS; i++) {
+            const xv = xa + (xb - xa) * i / N_TICKS;
+            const px = toX(xv);
+            ctx.beginPath(); ctx.moveTo(px, MT + PH); ctx.lineTo(px, MT + PH + 7); ctx.stroke();
+            ctx.fillText(xv.toFixed(0), px, MT + PH + 9);
+        }
+
+        // Y ticks
+        ctx.textAlign   = 'right';
+        ctx.textBaseline = 'middle';
+        for (let i = 0; i <= N_TICKS; i++) {
+            const yv = ya + (yb - ya) * i / N_TICKS;
+            const py = toY(yv);
+            ctx.beginPath(); ctx.moveTo(ML, py); ctx.lineTo(ML - 7, py); ctx.stroke();
+            ctx.fillText(yv.toFixed(2), ML - 10, py);
+        }
+
+        // ── Regression line (clipped to plot area) ──
+        ctx.save();
+        ctx.beginPath(); ctx.rect(ML, MT, PW, PH); ctx.clip();
+        ctx.strokeStyle = '#008B8B'; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(toX(xa), toY(slope * xa + intc));
+        ctx.lineTo(toX(xb), toY(slope * xb + intc));
+        ctx.stroke();
+        ctx.restore();
+
+        // ── Data points ──
+        pts.forEach(pt => {
+            const outlier = Math.abs(pt.fov - (slope * pt.dist + intc)) > rmse;
+            const px = toX(pt.dist), py = toY(pt.fov);
+            ctx.fillStyle   = outlier ? '#FF6600' : '#00DD00';
+            ctx.strokeStyle = outlier ? '#AA4400' : '#FFFFFF';
+            ctx.lineWidth   = 1;
+            ctx.beginPath(); ctx.arc(px, py, 5, 0, 2 * Math.PI);
+            ctx.fill(); ctx.stroke();
+        });
+
+        // ── n= annotation ──
+        const nEl = document.getElementById('graph-n');
+        if (nEl) nEl.innerText = 'n=' + pts.length + (state.isCustomCalib ? '' : ' (factory)');
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BT INFO
+    // ─────────────────────────────────────────────────────────────────────────
+    function updateBtInfoUI(connected) {
+        state.btConnected = connected;
+        // Update BT rune badge on main screen
+        document.getElementById('bt-rune-bg').setAttribute('fill', connected ? '#006400' : '#780000');
+        const status = document.getElementById('btinfo-status');
+        status.innerText    = connected ? 'CONNECTED' : 'Ready to pair';
+        status.style.color  = connected ? '#00FF00'   : '#FF0000';
+
+        document.getElementById('bt-devices-row').style.display = connected ? 'block' : 'none';
+        document.getElementById('bt-rssi-row').style.display    = connected ? 'block' : 'none';
+        document.getElementById('bt-mtu-row').style.display     = connected ? 'block' : 'none';
+
+        const testBtn = document.getElementById('btn-bt-test');
+        testBtn.style.background = connected ? '#A800F8' : '#101010';
+        testBtn.style.color      = connected ? '#FFF'    : '#787878';
+    }
+
+    function btTestAlert() {
+        if (!state.btConnected) return;
+        const btn = document.getElementById('btn-bt-test');
+        btn.innerText = 'SENT!';
+        btn.style.background = '#ADFF2F';
+        btn.style.color = '#000';
+        setTimeout(() => {
+            btn.innerText = 'TEST ALERT';
+            btn.style.background = '#A800F8';
+            btn.style.color = '#FFF';
+        }, 600);
+        sendCommand('testAlert', 1);
+    }
+
+    function btResetBonds() {
+        showConfirm('Reset all Bluetooth bonds?\nDevice will restart.', () => {
+            sendCommand('resetBonds', 1);
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CONFIRM MODAL
+    // ─────────────────────────────────────────────────────────────────────────
+    function showConfirm(msg, onYes) {
+        const modal = document.getElementById('confirm-modal');
+        document.getElementById('confirm-msg').innerText = msg;
+        modal.style.display = 'flex';
+        document.getElementById('confirm-yes').onclick = () => { modal.style.display = 'none'; onYes(); };
+        document.getElementById('confirm-no').onclick  = () => { modal.style.display = 'none'; };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRANSPORT — WIFI (HTTP + WebSocket)
+    // ─────────────────────────────────────────────────────────────────────────
+    let ws = null;
+    let wifiBase = '';
+    let wifiIP = '';
+    let reconnectAttempts = 0;
+    let reconnectTimer = null;
+
+    // Packet-rate tracking
+    let pktCount = 0;
+    let pktRateDisplay = 0;
+    setInterval(() => {
+        pktRateDisplay = pktCount;
+        pktCount = 0;
+        const connected = ws && ws.readyState === WebSocket.OPEN;
+        if (connected) updateWifiZone(true);   // refresh pps readout every second
+        if (state.screen === 'screen-wifiinfo') updateWifiInfoUI();
+    }, 1000);
+
+    function updateWifiZone(connected) {
+        // Determine bar count from RSSI (if known), else 0 bars when disconnected
+        const rssi = state.wifiRSSI;
+        let bars = 0;
+        if (connected) {
+            bars = rssi === null ? 2           // connected but RSSI not yet known → show 2 bars
+                 : rssi > -55   ? 4
+                 : rssi > -65   ? 3
+                 : rssi > -75   ? 2
+                 : 1;
+        }
+        const barCol = bars === 4 ? '#00FF00'
+                     : bars === 3 ? '#ADFF2F'
+                     : bars === 2 ? '#FFA500'
+                     : bars === 1 ? '#FF4400'
+                     : '#787878'; // disconnected — grey bars
+        for (let i = 1; i <= 4; i++) {
+            const el = document.getElementById('wbar-' + i);
+            if (el) el.setAttribute('fill', i <= bars ? barCol : '#404040');
+        }
+        const label  = document.getElementById('wifi-zone-label');
+        const ppsEl  = document.getElementById('wifi-zone-pps');
+        if (connected) {
+            label.style.color = barCol;
+            label.innerText   = 'WIFI';
+            if (ppsEl) { ppsEl.style.display = 'block'; ppsEl.style.color = '#787878';
+                         ppsEl.innerText = pktRateDisplay + '/s'; }
+        } else if (reconnectTimer) {
+            label.style.color = '#FFA500'; label.innerText = 'RETRY…';
+            if (ppsEl) ppsEl.style.display = 'none';
+        } else {
+            label.style.color = '#787878'; label.innerText = 'NO WIFI';
+            if (ppsEl) ppsEl.style.display = 'none';
+        }
+    }
+
+    function disconnectWifi() {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (ws) { ws.onclose = null; ws.close(); ws = null; }
+        wifiBase = ''; wifiIP = '';
+        const status = document.getElementById('connection-status');
+        status.innerText = 'WiFi: DISCONNECTED'; status.style.color = '#888';
+        updateWifiZone(false);
+        updateWifiInfoUI();
+    }
+
+    function updateWifiInfoUI() {
+        const connected = ws && ws.readyState === WebSocket.OPEN;
+        const statusEl = document.getElementById('wi-status');
+        statusEl.innerText    = connected ? 'CONNECTED' : (reconnectTimer ? 'RECONNECTING…' : 'DISCONNECTED');
+        statusEl.style.color  = connected ? '#00FF00'   : (reconnectTimer ? '#FFA500' : '#FF0000');
+        document.getElementById('wi-ip').innerText   = wifiIP || '—';
+        document.getElementById('wi-ssid').innerText = state.wifiSSID || '—';
+        document.getElementById('wi-pps').innerText  = connected ? pktRateDisplay + ' pkt/s' : '—';
+        if (!connected) {
+            const rssiEl = document.getElementById('wi-rssi');
+            const latEl  = document.getElementById('wi-latency');
+            if (rssiEl) { rssiEl.innerText = '—'; rssiEl.style.color = '#787878'; }
+            if (latEl)  { latEl.innerText  = '—'; latEl.style.color  = '#787878'; }
+        }
+    }
+
+    async function connectWifi() {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        reconnectAttempts = 0;
+        // patched3: pull the target host from the browser URL bar.  When the
+        // page was served by the ESP32 itself (the normal flow), this resolves
+        // to the ESP32's IP automatically — no manual entry needed.
+        wifiIP = window.location.hostname;
+        wifiBase = 'http://' + wifiIP;
+        const status = document.getElementById('connection-status');
+        status.innerText = 'WiFi: CONNECTING…'; status.style.color = '#FFA500';
+        updateWifiZone(false);
+        try {
+            const r = await fetch(wifiBase + '/state', { signal: AbortSignal.timeout(3000) });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            const data = await r.json();
+            applyFullState(data);
+            status.innerText = 'WiFi: CONNECTED'; status.style.color = '#00FF00';
+            updateWifiZone(true);
+            openWebSocket(wifiIP);
+        } catch (e) {
+            status.innerText = 'WiFi: FAILED — ' + e.message; status.style.color = '#FF0000';
+            updateWifiZone(false);
+        }
+    }
+
+    function openWebSocket(ip) {
+        if (ws) { ws.onclose = null; ws.close(); }
+        ws = new WebSocket('ws://' + ip + '/ws');
+
+        ws.onopen = () => {
+            reconnectAttempts = 0;
+            if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+            const status = document.getElementById('connection-status');
+            status.innerText = 'WiFi: CONNECTED'; status.style.color = '#00FF00';
+            updateWifiZone(true);
+            if (state.screen === 'screen-wifiinfo') updateWifiInfoUI();
+        };
+
+        ws.onmessage = e => {
+            pktCount++;
+            try { applyFullState(JSON.parse(e.data)); } catch {}
+        };
+
+        ws.onclose = () => {
+            updateWifiZone(false);
+            if (state.screen === 'screen-wifiinfo') updateWifiInfoUI();
+            const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
+            reconnectAttempts++;
+            const status = document.getElementById('connection-status');
+            status.innerText = `WiFi: RECONNECTING in ${Math.round(delay / 1000)}s…`;
+            status.style.color = '#FFA500';
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                openWebSocket(ip);
+            }, delay);
+        };
+    }
+
+    async function sendCommand(key, val) {
+        const payload = JSON.stringify({ [key]: val });
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(payload);
+        } else if (wifiBase) {
+            try {
+                await fetch(wifiBase + '/cmd', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload,
+                    signal: AbortSignal.timeout(2000)
+                });
+            } catch {}
+        }
+    }
+
+    function applyFullState(data) {
+        // Unpack minified fast-telem keys → canonical long names so the
+        // rest of the handler never needs to know which frame type arrived.
+        if (data.d  !== undefined) data.dist          = data.d;
+        if (data.f  !== undefined) data.fov           = data.f;
+        if (data.e  !== undefined) data.fovErr        = data.e;
+        if (data.sg !== undefined) data.signal        = data.sg;
+        if (data.a  !== undefined) data.sensorAmbient = data.a;
+        if (data.ss !== undefined) data.sensorStatus  = data.ss;
+        if (data.t  !== undefined) data.trigger       = data.t;
+        if (data.wr !== undefined) data.wifiRSSI      = data.wr;
+        if (data.br !== undefined) data.btRSSI        = data.br;
+
+        // ── Main screen live values (FOV + distance) ──
+        // Buffer every incoming value; flush to DOM at most 3 Hz so the
+        // display settles rather than flickering with each 30 Hz frame.
+        if (data.dist   !== undefined) state._pendingDist   = data.dist;
+        if (data.fov    !== undefined) state._pendingFov    = data.fov;
+        if (data.fovErr !== undefined) state._pendingFovErr = data.fovErr;
+        {
+            const now = Date.now();
+            if (!state._lastLiveRenderMs || now - state._lastLiveRenderMs >= 333) {
+                if (state._pendingDist !== undefined)
+                    document.getElementById('val-dist').innerText = state._pendingDist + ' mm';
+                if (state._pendingFov !== undefined) {
+                    const errCentimm = state._pendingFovErr;
+                    const errSpan = errCentimm !== undefined
+                        ? `<span class="fov-err">(${errCentimm})</span>`
+                        : '';
+                    document.getElementById('val-fov').innerHTML =
+                        state._pendingFov.toFixed(2) + errSpan + '<span class="fov-unit"> mm</span>';
+                }
+                state._lastLiveRenderMs = now;
+            }
+        }
+        if (data.signal !== undefined) {
+            const sigPct = Math.min(100, data.signal / 50 * 100);
+            const sigFill = document.getElementById('signal-bar-fill');
+            sigFill.style.width = sigPct + '%';
+            sigFill.style.backgroundColor = sigPct > 66 ? '#00FF00' : sigPct > 33 ? '#FFA500' : '#FF4400';
+            state.sensorSignal = data.signal;
+            if (state.screen === 'screen-sensorinfo') refreshSensorInfoUI();
+        }
+        if (data.obj !== undefined) applyObjective(data.obj);
+
+        // ── Stack calc ──
+        if (data.stepIndex !== undefined) { state.stepIndex = data.stepIndex; updateStackCalcUI(); }
+        if (data.imgs      !== undefined) { state.imgs = data.imgs; updateStackCalcUI(); }
+        if (data.secStep   !== undefined) { state.secStep = data.secStep; updateStackTimeUI(); }
+
+        // ── Brightness / LED ──
+        if (data.brightness !== undefined) { state.brightness = data.brightness; updateBrightnessUI(); updateSettingsUI(); }
+        if (data.ledEnabled !== undefined) { state.ledEnabled = !!data.ledEnabled; updateBrightnessUI(); applyTriggerVisuals(); }
+        if (data.ledDuty    !== undefined) { state.ledDuty = data.ledDuty; updateBrightnessUI(); applyTriggerVisuals(); }
+
+        // ── Timeouts / theme / tint ──
+        if (data.dimMs   !== undefined) { state.dimMs = data.dimMs; updateTimeoutUI(); }
+        if (data.sleepMs !== undefined) { state.sleepMs = data.sleepMs; updateTimeoutUI(); }
+        if (data.theme   !== undefined) applyTheme(data.theme);
+        if (data.tint    !== undefined) { state.tintPct = data.tint; updateTimeoutUI(); }
+
+        // ── Sensor state & live readings ──
+        if (data.sensorSleeping !== undefined) { state.sensorSleeping = !!data.sensorSleeping; if (state.screen === 'screen-sensorinfo') refreshSensorInfoUI(); }
+        if (data.highReflMode   !== undefined) { state.highReflMode   = !!data.highReflMode;   if (state.screen === 'screen-sensorinfo') refreshSensorInfoUI(); }
+        if (data.sensorSignal !== undefined) {
+            state.sensorSignal = data.sensorSignal;
+            const sigPct2 = Math.min(100, data.sensorSignal / 50 * 100);
+            const sigFill2 = document.getElementById('signal-bar-fill');
+            sigFill2.style.width = sigPct2 + '%';
+            sigFill2.style.backgroundColor = sigPct2 > 66 ? '#00FF00' : sigPct2 > 33 ? '#FFA500' : '#FF4400';
+            if (state.screen === 'screen-sensorinfo') refreshSensorInfoUI();
+        }
+        if (data.sensorAmbient  !== undefined) { state.sensorAmbient  = data.sensorAmbient;    if (state.screen === 'screen-sensorinfo') refreshSensorInfoUI(); }
+        if (data.sensorStatus   !== undefined) { state.sensorStatusCode = data.sensorStatus;   if (state.screen === 'screen-sensorinfo') refreshSensorInfoUI(); }
+
+        // ── patched3: shutter trigger (fast telemetry @ 10 Hz) ──
+        if (data.trigger !== undefined) {
+            state.trigger = !!data.trigger;
+            applyTriggerVisuals();
+        }
+        // One-shot stack-complete event — sent by main.ino at the same moment
+        // the BLE HID key would have fired (after MIN_ACTIVE + SILENCE).
+        // BLE-free fallback for the stacker app's "stack done" prompt.
+        if (data.stackDone) {
+            if ('Notification' in window && Notification.permission === 'granted') {
+                try { new Notification('AutoFOV', { body: 'Stack complete', tag: 'stack-done' }); } catch {}
+            }
+            // Audible cue for desktop users with notifications disabled.
+            try {
+                const ctx = new (window.AudioContext || window.webkitAudioContext)();
+                const o = ctx.createOscillator(), g = ctx.createGain();
+                o.connect(g); g.connect(ctx.destination);
+                o.frequency.value = 880; g.gain.value = 0.15;
+                o.start(); o.stop(ctx.currentTime + 0.18);
+            } catch {}
+        }
+
+        // ── BT ──
+        if (data.btConnected !== undefined) updateBtInfoUI(!!data.btConnected);
+        if (data.btMac   !== undefined) document.getElementById('bt-mac').innerText   = data.btMac;
+        if (data.btBonds !== undefined) document.getElementById('bt-bonds').innerText = data.btBonds + ' stored';
+        if (data.btRSSI  !== undefined) {
+            const col = data.btRSSI > -65 ? '#00FF00' : data.btRSSI > -80 ? '#FFFF00' : '#FFA500';
+            const el = document.getElementById('bt-rssi');
+            el.innerText = data.btRSSI + ' dBm'; el.style.color = col;
+        }
+        if (data.btMTU !== undefined) document.getElementById('bt-mtu').innerText = data.btMTU + ' bytes';
+        if (data.btDevices !== undefined) {
+            document.getElementById('bt-devices').innerText =
+                data.btDevices + (data.btDevices === 1 ? ' device' : ' devices');
+        }
+
+        // ── Calibration status badge (main screen + state flag) ──
+        if (data.isCustomCalib !== undefined) {
+            state.isCustomCalib = !!data.isCustomCalib;
+            const el = document.getElementById('calib-status');
+            el.innerText   = state.isCustomCalib ? 'CALIB: LOADED' : 'CALIB: FACTORY';
+            el.style.color = state.isCustomCalib ? '#ADFF2F' : '#FFA500';
+        }
+
+        // ── Calibration fit results (FOV info screen) ──
+        let fovInfoDirty = false;
+        if (data.fovSlope     !== undefined) { state.fovSlope     = data.fovSlope;     fovInfoDirty = true; }
+        if (data.fovIntercept !== undefined) { state.fovIntercept = data.fovIntercept; fovInfoDirty = true; }
+        if (data.calibError   !== undefined) { state.calibError   = data.calibError;   fovInfoDirty = true; }
+        if (data.calibR2      !== undefined) { state.calibR2      = data.calibR2;      fovInfoDirty = true; }
+        if (data.calWidth     !== undefined) { state.photoWidth   = data.calWidth;     fovInfoDirty = true; updateCalSettingsUI(); }
+        if (data.demarcDist   !== undefined) { state.demarcDist   = data.demarcDist;   updateCalSettingsUI(); }
+        if (data.calPoints    !== undefined) { state.calPoints    = data.calPoints;    updateCalSettingsUI(); }
+        if (fovInfoDirty) {
+            if (state.screen === 'screen-fovinfo' || state.screen === 'screen-calgraph') updateFovInfoUI();
+        }
+        // ── Cal graph points (device sends full array after custom calibration) ──
+        if (data.calGraphPoints !== undefined) {
+            state.calGraphPoints = data.calGraphPoints;
+            if (state.screen === 'screen-calgraph') drawCalGraph();
+        }
+
+        // ── Cal point result (device echoes captured dist+fov) ──
+        if (data.calPointResult !== undefined) {
+            const p = state.capturedPoints[data.calPointResult.idx];
+            if (p) { p.dist = data.calPointResult.dist; p.fov = data.calPointResult.fov; }
+            if (state.screen === 'screen-calreview') renderCalReview();
+        }
+
+        // ── Memory ──
+        let memDirty = false;
+        if (data.freeHeap   !== undefined) { state.freeHeap   = data.freeHeap;   memDirty = true; }
+        if (data.totalHeap  !== undefined) { state.totalHeap  = data.totalHeap;  memDirty = true; }
+        if (data.lowestFree !== undefined) { state.lowestFree = data.lowestFree; memDirty = true; }
+        if (data.spriteKB   !== undefined) { state.spriteKB   = data.spriteKB;   memDirty = true; }
+        if (data.psramFree  !== undefined) { state.psramFree  = data.psramFree;  memDirty = true; }
+        if (data.psramTotal !== undefined) { state.psramTotal = data.psramTotal; memDirty = true; }
+        if (data.cpu        !== undefined) { state.cpu        = data.cpu;        memDirty = true; }
+        if (data.sdk        !== undefined) { state.sdk        = data.sdk;        memDirty = true; }
+        if (memDirty && state.screen === 'screen-memory') updateMemoryUI();
+
+        // ── About / build info ──
+        let aboutDirty = false;
+        if (data.buildDate   !== undefined) { state.buildDate   = data.buildDate;   aboutDirty = true; }
+        if (data.buildTime   !== undefined) { state.buildTime   = data.buildTime;   aboutDirty = true; }
+        if (data.sketchKB    !== undefined) { state.sketchKB    = data.sketchKB;    aboutDirty = true; }
+        if (data.freeFlashKB !== undefined) { state.freeFlashKB = data.freeFlashKB; aboutDirty = true; }
+        if (data.sourceLines !== undefined) { state.sourceLines = data.sourceLines; aboutDirty = true; }
+        if (data.chipInfo    !== undefined) { state.chipInfo    = data.chipInfo;    aboutDirty = true; }
+        if (aboutDirty && state.screen === 'screen-about') updateAboutUI();
+
+        // ── WiFi info screen ──
+        if (data.wifiSSID !== undefined) {
+            state.wifiSSID = data.wifiSSID;
+            if (state.screen === 'screen-wifiinfo') updateWifiInfoUI();
+        }
+        if (data.wifiRSSI !== undefined) {
+            state.wifiRSSI = data.wifiRSSI;
+            const col = data.wifiRSSI > -55 ? '#00FF00' : data.wifiRSSI > -65 ? '#ADFF2F' : data.wifiRSSI > -75 ? '#FFA500' : '#FF4400';
+            const el = document.getElementById('wi-rssi');
+            el.innerText = data.wifiRSSI + ' dBm'; el.style.color = col;
+            // refresh bar indicator on main screen
+            if (ws && ws.readyState === WebSocket.OPEN) updateWifiZone(true);
+        }
+        if (data.latency !== undefined) {
+            const el = document.getElementById('wi-latency');
+            el.innerText = data.latency + ' ms'; el.style.color = data.latency < 20 ? '#00FF00' : '#FFA500';
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INIT
+    // ─────────────────────────────────────────────────────────────────────────
+    applyObjective(3);
+    if ('Notification' in window && Notification.permission === 'default') {
+        try { Notification.requestPermission(); } catch {}
+    }
+    updateStackCalcUI();
+    updateBrightnessUI();
+    updateSettingsUI();
+    updateTimeoutUI();
+    updateFovInfoUI();   // show factory cal values immediately (before WiFi)
+    updateAboutUI();     // show partial defaults (source lines, chip) before WiFi
+    applyTheme(state.themeIndex);  // apply initial theme background + tint
+    applyTriggerVisuals();          // patched3: init sphere/bezel-LED visibility
+
+    // patched3: auto-connect on page load.  When opened by browsing to the
+    // ESP32's IP, window.location.hostname is the device IP and connectWifi()
+    // talks to it directly.  When opened locally via file://, hostname is
+    // empty — we skip the auto-connect so the page doesn't fail-loop on a
+    // bogus URL.  (Open with `?ip=<addr>` or set hostname manually for dev.)
+    // Viewport-fitted scale: fills ~92 % of screen width on mobile, caps at 2× on desktop.
+    // transform: scale() doesn't expand the CSS box, so we also push bezel-bottom-row
+    // down by the visual overflow: margin = 320 * (scale - 1) + gap.
+    function applyScale() {
+        const vw = window.innerWidth;
+        const display   = document.getElementById('ili9341-display');
+        const bottomRow = document.getElementById('bezel-bottom-row');
+        if (vw > 850) {
+            display.style.transform   = '';   // let CSS handle 2×
+            bottomRow.style.marginTop = '';
+        } else {
+            const s = Math.min((vw * 0.92) / 240, 2.0);
+            display.style.transform   = `scale(${s.toFixed(3)})`;
+            bottomRow.style.marginTop = (Math.round(320 * (s - 1)) + 12) + 'px';
+        }
+    }
+    window.addEventListener('resize', applyScale);
+    applyScale();
+
+    window.addEventListener('load', () => {
+        if (window.location.hostname) {
+            connectWifi();
+        } else {
+            const status = document.getElementById('connection-status');
+            if (status) {
+                status.innerText = 'WiFi: open via http://<esp-ip>';
+                status.style.color = '#FFA500';
+            }
+        }
+    });
+    </script>
+</body>
+</html>
