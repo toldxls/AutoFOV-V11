@@ -193,7 +193,12 @@ static void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             return;
         }
 
-        char buf[len + 1];
+        if (len > 512) {
+            Serial.printf("[WS] Payload too large (%u bytes), dropping\n", (unsigned)len);
+            Serial.flush();
+            return;
+        }
+        char buf[513];
         memcpy(buf, data, len);
         buf[len] = '\0';
         Serial.printf("[WS] data rx: %s\n", buf);
@@ -525,9 +530,8 @@ struct StaConnectArgs {
 
 static void staConnectTask(void* arg) {
     StaConnectArgs* args = (StaConnectArgs*)arg;
-
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
+    // WiFi.mode(WIFI_STA) and setAutoReconnect are called in startStaMode()
+    // before this task spawns so the coex layer is registered before BLE init.
 
     // Apply static IP before begin() if the user configured one
     if (!args->staticIP.isEmpty()) {
@@ -577,6 +581,14 @@ static void staConnectTask(void* arg) {
 static void startStaMode(const String& ssid, const String& pass,
                           const String& staticIP, const String& gateway) {
     wifiServerMode = WMODE_STA;
+
+    // Call WiFi.mode() HERE, synchronously, before the task spawns.
+    // NimBLEDevice::init() must run after WiFi.mode() so both peripherals
+    // register with the coex scheduler in the correct order.  Moving this
+    // out of staConnectTask ensures setup() can call bleInitDeferred()
+    // immediately after wifiSetup() returns without any race.
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
 
     StaConnectArgs* args = new StaConnectArgs();
     args->ssid     = ssid;
@@ -635,7 +647,11 @@ static void startFullServer() {
         [](AsyncWebServerRequest* req) { /* headers only — body handled below */ },
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t) {
-            char buf[len + 1];
+            if (len > 512) {
+                req->send(400, "text/plain", "Payload too large");
+                return;
+            }
+            char buf[513];
             memcpy(buf, data, len);
             buf[len] = '\0';
             StaticJsonDocument<256> doc;
@@ -1113,6 +1129,12 @@ static void buildFastTelemJson(String& out) {
 // Settings-only push — used by the state-change detector in wifiLoop().
 // Compact (≤ 400 bytes) so wsServer.textAll() doesn't stall Core 1 the way a
 // full-state frame (2 KB, DynamicJsonDocument 3072) does.
+void wifiPushSettings() {
+    if (!wifiConnected || wsServer.count() == 0) return;
+    String out; buildSettingsJson(out);
+    wsServer.textAll(out);
+}
+
 static void buildSettingsJson(String& out) {
     StaticJsonDocument<512> doc;
     doc["obj"]           = currentobj;

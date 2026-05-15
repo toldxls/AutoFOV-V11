@@ -628,8 +628,6 @@ uint32_t wifiForgetAtMs = 0;
 // controller and BLE crashes.  We init BLE from loop() once WiFi has settled
 // (either connected, or definitively failed past a grace window).
 bool     bleInitDone        = false;
-uint32_t bleInitDeferStart  = 0;          // millis() snapshot taken in setup()
-const uint32_t BLE_INIT_GRACE_MS = 10000UL;   // wait up to 10 s for STA connect
 
 // patched3: WIFI_INFO live-refresh timer (mirrors lastBtInfoUpdate pattern).
 unsigned long lastWifiInfoUpdate = 0;
@@ -713,7 +711,8 @@ void handleWifiInfoTouch(TS_Point p);      // patched3
 void wifiForgetAndRestart();               // patched3: defined in patched3_wifi.ino
 void wifiNotifyStackComplete();            // patched3: BLE-free stack-done WS event
 void redrawCurrentScreen();                // patched3: full repaint of currentMode
-void bleInitDeferred();                    // patched3: NimBLE bring-up, called from loop()
+void bleInitDeferred();                    // NimBLE bring-up — called from setup()
+void wifiPushSettings();                   // push buildSettingsJson to all WS clients
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1953,8 +1952,7 @@ void drawBtInfoUI() {
   tft.fillScreen(THEME_BG);
   drawLeftBoxedText("BLUETOOTH", 5, 5, COLOR_DARKBLUE);
 
-  // Guard: bleInitDeferred() fires within BLE_INIT_GRACE_MS of boot, but the
-  // user could conceivably open this screen in the first few seconds.
+  // Guard: BLE init runs in setup() but may fail in portal mode.
   bool bleReady = (NimBLEDevice::getServer() != nullptr);
   if (!bleReady) {
     sensorRow("Status:", "INITIALISING…", COLOR_DARKGREY, 42);
@@ -2407,19 +2405,16 @@ void setup() {
   Serial.printf("[BOOT] WiFi init done — free heap after: %u\n", ESP.getFreeHeap());
   Serial.flush();
 
-  // patched3: BLE init is now ALWAYS deferred to loop().  Doing it inline
-  // here used to crash on ESP32-S3 because the Core-0 STA-connect task was
-  // still mid-WiFi.begin() — both peripherals racing for the BT controller.
-  // bleInitDeferred() runs from loop() once WiFi has either connected or
-  // definitively failed (10 s grace).  In portal mode, BLE stays uninit'd
-  // entirely (no STA connect ever happens — grace window won't expire from
-  // an STA wait, and the loop check also gates on !wifiIsPortal()).
+  // BLE init runs here, immediately after wifiSetup().
+  // WiFi.mode() was called synchronously inside startStaMode() / startPortalMode()
+  // before wifiSetup() returned, so the coex scheduler has both peripherals
+  // registered in the right order.  No deferred 10s wait needed.
   if (wifiIsPortal()) {
-    Serial.println("[BOOT] PORTAL MODE — BLE will stay disabled until next reboot");
+    Serial.println("[BOOT] PORTAL MODE — BLE disabled (no coex slot)");
   } else {
-    Serial.println("[BOOT] BLE init deferred — will fire from loop() after WiFi settles");
+    bleInitDeferred();
+    bleInitDone = true;
   }
-  bleInitDeferStart = millis();
   Serial.flush();
 
   preferences.begin("calib", false);
@@ -2615,20 +2610,6 @@ void saveAllSettings() {
 }
 
 void loop() {
-  // Deferred BLE init — fires once, from loop(), after WiFi has settled.
-  // Heap budget confirmed: 123 KB lowest-free with PSRAM sprites + WiFi + BLE.
-  if (!bleInitDone && !wifiIsPortal()) {
-    bool wifiOk    = (WiFi.status() == WL_CONNECTED);
-    bool graceDone = ((millis() - bleInitDeferStart) > BLE_INIT_GRACE_MS);
-    if (wifiOk || graceDone) {
-      Serial.printf("[BLE] Deferred-init gate — wifiOk=%d graceDone=%d  heap=%u\n",
-                    wifiOk, graceDone, ESP.getFreeHeap());
-      Serial.flush();
-      bleInitDeferred();
-      bleInitDone = true;
-    }
-  }
-
   // V11 deferred display-prefs save — if the tint slider was dragged and
   // 500ms has passed since the last drag sample, flush to NVS now. Avoids
   // writing flash on every drag step (which choked the UI and chewed through
@@ -2846,6 +2827,7 @@ void loop() {
           currentBrightness = max(1, (int)map(valX, 15, 225, 1, 255));
           analogWrite(LITE_PIN, currentBrightness);
           drawOldBrightnessBar();
+          wifiPushSettings();
         } else if (currentMode == SCREEN_TIMEOUT) {
           handleScreenTimeoutTouch(p);
         } else {
