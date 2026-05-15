@@ -623,11 +623,10 @@ bool isClearingBonds = false;
 // 0 = no pending forget.
 uint32_t wifiForgetAtMs = 0;
 
-// patched3: deferred BLE init.  NimBLE init can't run while WiFi's Core-0
-// connect-task is still bringing up the radio — the two race for the BT
-// controller and BLE crashes.  We init BLE from loop() once WiFi has settled
-// (either connected, or definitively failed past a grace window).
 bool     bleInitDone        = false;
+// Set true at the end of setup() so the WiFi task won't call startFullServer()
+// until BLE init and all other setup allocations are complete.
+volatile bool setupComplete = false;
 
 // patched3: WIFI_INFO live-refresh timer (mirrors lastBtInfoUpdate pattern).
 unsigned long lastWifiInfoUpdate = 0;
@@ -2180,10 +2179,12 @@ void bleInitDeferred() {
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->setAppearance(961);
   pAdvertising->addServiceUUID(hid->getHidService()->getUUID());
-  pAdvertising->setScanResponseData(NimBLEAdvertisementData());
+  pAdvertising->setName("ESP_Cam");   // must be explicit in NimBLE 2.x; init() sets GATT name only
   pAdvertising->setMinInterval(0x20);
   pAdvertising->setMaxInterval(0x40);
-  pAdvertising->start(0);
+  bool advOk = pAdvertising->start(0);
+  Serial.printf("[BLE] Advertising start: %s\n", advOk ? "OK" : "FAILED");
+  Serial.flush();
 
   Serial.printf("[BLE] Init complete — free heap: %u\n", ESP.getFreeHeap());
   Serial.flush();
@@ -2409,12 +2410,9 @@ void setup() {
   // WiFi.mode() was called synchronously inside startStaMode() / startPortalMode()
   // before wifiSetup() returned, so the coex scheduler has both peripherals
   // registered in the right order.  No deferred 10s wait needed.
-  if (wifiIsPortal()) {
-    Serial.println("[BOOT] PORTAL MODE — BLE disabled (no coex slot)");
-  } else {
-    bleInitDeferred();
-    bleInitDone = true;
-  }
+  // patched3: portal mode now safe for BLE — coex order fixed above.
+  bleInitDeferred();
+  bleInitDone = true;
   Serial.flush();
 
   preferences.begin("calib", false);
@@ -2510,9 +2508,6 @@ void setup() {
   Wire.setClock(400000); 
   i2cMutex = xSemaphoreCreateMutex();
 
-  // patched3: BLE init block extracted to bleInitDeferred() below; called
-  // from loop() when WiFi has settled.
-
   if (xSemaphoreTake(i2cMutex, portMAX_DELAY)) {
     if (!touch.begin(40)) { Serial.println("Couldn't start FT6206"); }
     sensor.begin();
@@ -2543,6 +2538,7 @@ void setup() {
   // patched3: wifiSetup() now runs BEFORE NimBLE init (see comment above) —
   // not called here anymore.  See the BLE-coexistence note around line 2310.
 
+  setupComplete = true;
   Serial.println("[BOOT] setup() complete — entering loop()"); Serial.flush();
 }
 

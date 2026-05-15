@@ -570,6 +570,11 @@ static void staConnectTask(void* arg) {
                       WiFi.status(), RECONNECT_INTERVAL_MS / 1000);
     }
 
+    // Wait for setup() to finish before starting the server.
+    // BLE init drops heap to ~73 KB; httpServer.begin() needs another ~20 KB.
+    // Running both concurrently exhausted the heap and caused a boot loop.
+    while (!setupComplete) { vTaskDelay(pdMS_TO_TICKS(20)); }
+
     // startFullServer registers handlers + calls httpServer.begin().
     // Doesn't touch TFT — safe from Core 0.
     startFullServer();
@@ -597,9 +602,9 @@ static void startStaMode(const String& ssid, const String& pass,
     args->gateway  = gateway;
 
     // Pin to Core 0 alongside AsyncTCP/sensor-event tasks.  Priority 1 = low.
-    // 4 KB stack is generous for WiFi.begin + AsyncWebServer init.
+    // 8 KB: startFullServer() calls into AsyncTCP/lwIP which needs >4 KB.
     xTaskCreatePinnedToCore(staConnectTask, "WiFiConnect",
-                            4096, args, 1, NULL, 0);
+                            8192, args, 1, NULL, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -755,6 +760,7 @@ static void handleWifiCommand(const char* key, const char* val) {
         preferences.putBytes("settings", &settings, sizeof(CalibData));
         preferences.end();
         if (currentMode == BRIGHTNESS_SETTINGS) refreshBrightnessSettingsValues(true);
+        else if (currentMode == APP_SETTINGS)   drawOldBrightnessBar();
 
     // ── Trigger LED enabled flag ──────────────────────────────────────────────
     } else if (strcmp(key, "ledEnabled") == 0) {

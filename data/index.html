@@ -1340,9 +1340,9 @@
         // land out-of-order or get dropped.
         if (sliderType === 'brightness') {
             state.brightness = Math.max(1, Math.round(pct * 255));
+            sendCommandThrottled('brightness', state.brightness);
             updateBrightnessUI();
             updateSettingsUI();
-            sendCommandThrottled('brightness', state.brightness);
         } else if (sliderType === 'led') {
             if (!state.ledEnabled) return;
             state.ledDuty = Math.round(pct * 127);
@@ -2051,9 +2051,16 @@
         if (data.secStep   !== undefined) { state.secStep = data.secStep; updateStackTimeUI(); }
 
         // ── Brightness / LED ──
-        if (data.brightness !== undefined) { state.brightness = data.brightness; updateBrightnessUI(); updateSettingsUI(); }
+        // Skip brightness update while the user is dragging the slider — a
+        // concurrent device push of the pre-command value would snap the thumb
+        // back to the old position and block the outgoing command from landing.
+        if (data.brightness !== undefined && activeSlider !== 'brightness') {
+            state.brightness = data.brightness; updateBrightnessUI(); updateSettingsUI();
+        }
         if (data.ledEnabled !== undefined) { state.ledEnabled = !!data.ledEnabled; updateBrightnessUI(); applyTriggerVisuals(); }
-        if (data.ledDuty    !== undefined) { state.ledDuty = data.ledDuty; updateBrightnessUI(); applyTriggerVisuals(); }
+        if (data.ledDuty    !== undefined && activeSlider !== 'led') {
+            state.ledDuty = data.ledDuty; updateBrightnessUI(); applyTriggerVisuals();
+        }
 
         // ── Timeouts / theme / tint ──
         if (data.dimMs   !== undefined) { state.dimMs = data.dimMs; updateTimeoutUI(); }
