@@ -49,7 +49,6 @@
 // CONFIG
 // ─────────────────────────────────────────────────────────────────────────────
 static const char*     AP_SSID             = "AutoFOV-Setup";
-static const char*     AP_PASS             = "";          // open — no WPA2 for easy setup
 static const IPAddress AP_IP               (192, 168, 4, 1);
 static const IPAddress AP_GW               (192, 168, 4, 1);
 static const IPAddress AP_MASK             (255, 255, 255, 0);
@@ -65,6 +64,7 @@ static const int       CMD_QUEUE_DEPTH     = 16;
 // ─────────────────────────────────────────────────────────────────────────────
 enum WifiServerMode { WMODE_NONE, WMODE_PORTAL, WMODE_STA };
 static WifiServerMode  wifiServerMode      = WMODE_NONE;
+static char            portalCode[7]       = {0};  // random WPA2 password shown on TFT during setup
 static bool            wifiConnected       = false;
 static uint32_t        lastReconnectMs     = 0;
 static uint32_t        lastFastTelemMs     = 0;
@@ -154,6 +154,14 @@ Point your browser to that address to open the control panel.</p>
 // ─────────────────────────────────────────────────────────────────────────────
 // FORWARD DECLARATIONS
 // ─────────────────────────────────────────────────────────────────────────────
+static void generatePortalCode() {
+    // Omit visually ambiguous characters (0/O, 1/I/L).
+    static const char CHARS[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    for (int i = 0; i < 6; i++)
+        portalCode[i] = CHARS[esp_random() % (sizeof(CHARS) - 1)];
+    portalCode[6] = '\0';
+}
+
 static void startPortalMode();
 static void startStaMode(const String& ssid, const String& pass,
                           const String& staticIP, const String& gateway);
@@ -412,6 +420,8 @@ static void startPortalMode() {
     // (wifiSetup now runs BEFORE NimBLEDevice::init), pure WIFI_AP should
     // succeed — WiFi grabs the controller first and registers with coex.
 
+    generatePortalCode();
+    Serial.printf("[WiFi] Portal code: %s\n", portalCode);
     Serial.printf("[WiFi] === startPortalMode entry  heap=%u ===\n", ESP.getFreeHeap());
     Serial.flush();
 
@@ -432,7 +442,7 @@ static void startPortalMode() {
     //   channel 1  — least-used in most environments
     //   hidden 0   — broadcast SSID
     //   max_conn 4 — default
-    bool aOk = WiFi.softAP(AP_SSID, AP_PASS, /*channel*/ 1, /*hidden*/ 0, /*max_conn*/ 4);
+    bool aOk = WiFi.softAP(AP_SSID, portalCode, /*channel*/ 1, /*hidden*/ 0, /*max_conn*/ 4);
     Serial.printf("[WiFi] softAP = %d\n", aOk); Serial.flush();
 
     // Bump TX power to maximum allowed (19.5 dBm).
@@ -1190,8 +1200,9 @@ static void buildSlowTelemJson(String& out) {
 //   (Arduino builds all .ino files into one TU in alphabetical order, with the
 //   sketch-name file first.)
 // ─────────────────────────────────────────────────────────────────────────────
-bool   wifiIsConnected() { return wifiConnected; }
-bool   wifiIsPortal()    { return wifiServerMode == WMODE_PORTAL; }
+bool        wifiIsConnected()   { return wifiConnected; }
+bool        wifiIsPortal()      { return wifiServerMode == WMODE_PORTAL; }
+const char* wifiGetPortalCode() { return portalCode; }
 int    wifiGetRSSI()     { return wifiConnected ? (int)WiFi.RSSI() : 0; }
 String wifiGetIP()       { if (wifiServerMode == WMODE_PORTAL) return AP_IP.toString();
                            return wifiConnected ? WiFi.localIP().toString() : ""; }

@@ -718,6 +718,7 @@ void drawWifiInfoUI();                     // patched3: WiFi status screen
 void refreshWifiInfoValues();              // patched3: live row refresh
 void handleWifiInfoTouch(TS_Point p);      // patched3
 void wifiForgetAndRestart();               // patched3: defined in patched3_wifi.ino
+const char* wifiGetPortalCode();           // patched3: random WPA2 code shown on TFT during setup
 void wifiNotifyStackComplete();            // patched3: BLE-free stack-done WS event
 void redrawCurrentScreen();                // patched3: full repaint of currentMode
 void bleInitDeferred();                    // NimBLE bring-up — called from setup()
@@ -2086,8 +2087,8 @@ void refreshWifiInfoValues() {
     sensorRow("RSSI:", rssiBuf, rssiCol, 106);
     sensorRow("Mode:", "STA (connected)", themedText(COLOR_LIGHTGREY), 138);
   } else if (wifiIsPortal()) {
-    sensorRow("RSSI:", "---",              themedText(COLOR_DARKGREY), 106);
-    sensorRow("Mode:", "AP setup portal",  COLOR_ORANGE, 138);
+    sensorRow("Password:", wifiGetPortalCode(), COLOR_ORANGE, 106);
+    sensorRow("Mode:", "AP setup portal",       COLOR_ORANGE, 138);
   } else {
     sensorRow("RSSI:", "---",              themedText(COLOR_DARKGREY), 106);
     sensorRow("Mode:", "STA (offline)",    COLOR_RED, 138);
@@ -2103,8 +2104,8 @@ void refreshWifiInfoValues() {
     tft.setCursor(10, 175); tft.print(hint);
   } else if (wifiIsPortal()) {
     tft.setTextColor(COLOR_ORANGE);
-    tft.setCursor(10, 175); tft.print("Connect to 'AutoFOV-Setup'");
-    tft.setCursor(10, 187); tft.print("then open 192.168.4.1");
+    tft.setCursor(10, 175); tft.print("1. Join 'AutoFOV-Setup' with password");
+    tft.setCursor(10, 187); tft.print("2. Open browser -> 192.168.4.1");
   }
 }
 
