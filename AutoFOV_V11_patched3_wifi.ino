@@ -64,7 +64,7 @@ static const int       CMD_QUEUE_DEPTH     = 16;
 // ─────────────────────────────────────────────────────────────────────────────
 enum WifiServerMode { WMODE_NONE, WMODE_PORTAL, WMODE_STA };
 static WifiServerMode  wifiServerMode      = WMODE_NONE;
-static char            portalCode[7]       = {0};  // random WPA2 password shown on TFT during setup
+static char            portalCode[9]       = {0};  // random 8-char WPA2 password shown on TFT during setup
 static bool            wifiConnected       = false;
 static uint32_t        lastReconnectMs     = 0;
 static uint32_t        lastFastTelemMs     = 0;
@@ -155,11 +155,13 @@ Point your browser to that address to open the control panel.</p>
 // FORWARD DECLARATIONS
 // ─────────────────────────────────────────────────────────────────────────────
 static void generatePortalCode() {
+    // 8 chars: WPA2-PSK requires an 8-character minimum — softAP() rejects
+    // anything shorter and the AP never starts.
     // Omit visually ambiguous characters (0/O, 1/I/L).
     static const char CHARS[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 8; i++)
         portalCode[i] = CHARS[esp_random() % (sizeof(CHARS) - 1)];
-    portalCode[6] = '\0';
+    portalCode[8] = '\0';
 }
 
 static void startPortalMode();
@@ -341,16 +343,24 @@ void wifiLoop() {
     // ── Telemetry push ───────────────────────────────────────────────────────
     if (wsServer.count() == 0) return;   // no connected clients — skip serialisation
 
+    // Drop the frame entirely when any client's TX queue is full. Pushing into
+    // a full AsyncWebSocket queue drops the message or closes the socket; live
+    // telemetry wants the freshest frame, not a backlog. The timestamp is
+    // advanced regardless so a slow client just thins the stream.
     uint32_t now = millis();
     if (now - lastFastTelemMs >= FAST_TELEM_MS) {
         lastFastTelemMs = now;
-        String out; buildFastTelemJson(out);
-        wsServer.textAll(out);
+        if (wsServer.availableForWriteAll()) {
+            String out; buildFastTelemJson(out);
+            wsServer.textAll(out);
+        }
     }
     if (now - lastSlowTelemMs >= SLOW_TELEM_MS) {
         lastSlowTelemMs = now;
-        String out; buildSlowTelemJson(out);
-        wsServer.textAll(out);
+        if (wsServer.availableForWriteAll()) {
+            String out; buildSlowTelemJson(out);
+            wsServer.textAll(out);
+        }
     }
 
     // ── Device-side state-change detection ──────────────────────────────────
@@ -420,8 +430,6 @@ static void startPortalMode() {
     // (wifiSetup now runs BEFORE NimBLEDevice::init), pure WIFI_AP should
     // succeed — WiFi grabs the controller first and registers with coex.
 
-    generatePortalCode();
-    Serial.printf("[WiFi] Portal code: %s\n", portalCode);
     Serial.printf("[WiFi] === startPortalMode entry  heap=%u ===\n", ESP.getFreeHeap());
     Serial.flush();
 
@@ -434,6 +442,12 @@ static void startPortalMode() {
     Serial.printf("[WiFi] mode(AP) = %d  heap=%u\n", mOk, ESP.getFreeHeap());
     Serial.flush();
     delay(100);
+
+    // Generate the setup code AFTER WiFi.mode() — that enables the RF
+    // subsystem, which is what makes esp_random() a true hardware RNG.
+    // Called before this point it would return only pseudo-random values.
+    generatePortalCode();
+    Serial.printf("[WiFi] Portal code: %s\n", portalCode);
 
     bool cOk = WiFi.softAPConfig(AP_IP, AP_GW, AP_MASK);
     Serial.printf("[WiFi] softAPConfig = %d\n", cOk); Serial.flush();
@@ -815,13 +829,19 @@ static void handleWifiCommand(const char* key, const char* val) {
         if (currentMode == SENSOR_INFO) drawSensorInfoUI();
 
     // ── High-reflectivity mode ────────────────────────────────────────────────
+    // applyHighReflConfig() requires measurement to be stopped first — mirror
+    // the device-side path (handleSensorInfoTouch) exactly: stop, reconfigure,
+    // restart, then request an EMA reset so the post-change samples are clean.
     } else if (strcmp(key, "highRefl") == 0) {
         highReflMode = (iVal != 0);
         if (!sensorSleeping) {
-            if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200))) {
+            if (xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(500))) {
+                sensor.VL53L4CX_StopMeasurement();
                 applyHighReflConfig();
+                sensor.VL53L4CX_StartMeasurement();
                 xSemaphoreGive(i2cMutex);
             }
+            sensorEmaReset.store(true, std::memory_order_release);
         }
         if (currentMode == SENSOR_INFO) drawSensorInfoUI();
 

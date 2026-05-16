@@ -2544,7 +2544,16 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(TOUCH_INT_PIN), touchISR, FALLING);
   
   lastActivityTime = millis();
-  drawMainScreen();
+  // patched3: when we boot straight into the WiFi setup portal, open WIFI_INFO
+  // instead of MAIN. The 8-char AP password is generated per-boot and shown
+  // only on that screen — landing there means the user can read it and join
+  // the AP without having to discover the WiFi-zone tap on the header.
+  if (wifiIsPortal()) {
+    currentMode = WIFI_INFO;
+    drawWifiInfoUI();
+  } else {
+    drawMainScreen();
+  }
 
   // patched3: wifiSetup() now runs BEFORE NimBLE init (see comment above) —
   // not called here anymore.  See the BLE-coexistence note around line 2310.
