@@ -1044,13 +1044,7 @@ static void handleWifiCommand(const char* key, const char* val) {
     // patched3: extra guard on keyboardInput (null until BLE is up).
     } else if (strcmp(key, "testAlert") == 0) {
         if (keyboardInput != nullptr && btConnHandle != 0xFFFF) {
-            uint8_t press[8]   = {0x00, 0x00, HID_KEY_TRIGGER, 0, 0, 0, 0, 0};
-            uint8_t release[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-            keyboardInput->setValue(press, 8);
-            keyboardInput->notify();
-            delay(20);
-            keyboardInput->setValue(release, 8);
-            keyboardInput->notify();
+            sendTriggerKeystroke();   // leads with a wake report — see main tab
         } else {
             Serial.println("[WiFi] testAlert ignored — BLE not ready");
         }

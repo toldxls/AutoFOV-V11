@@ -725,6 +725,7 @@ void applyTheme(int idx);                  // V11
 void loadDisplayPrefs();                   // V11: load timeouts + theme from NVS
 void saveDisplayPrefs();                   // V11: persist timeouts + theme to NVS
 void fireTriggerLed(bool on);              // V17b: centralised active-low LED drive
+void sendTriggerKeystroke();               // wake-then-send BLE HID F12 keystroke
 void drawWifiInfoUI();                     // patched3: WiFi status screen
 void refreshWifiInfoValues();              // patched3: live row refresh
 void handleWifiInfoTouch(TS_Point p);      // patched3
@@ -1606,6 +1607,30 @@ void fireTriggerLed(bool on) {
   }
 }
 
+// Send one trigger keystroke (F12 / HID_KEY_TRIGGER) over BLE HID.
+//
+// An idle BLE HID link is parked by the phone's host, so the first report
+// after a long idle is routinely dropped — which is why an active stack pings
+// a null report every 5 s (see loop()). Callers without that keep-alive (the
+// TEST ALERT button, the post-reconnect retry) would otherwise lose their
+// first keystroke. So lead with a "wake" null report + a short pause to bring
+// the link back up, then send the real key-down / key-up pair.
+//
+// Caller must have already confirmed a live BLE connection. The ~200 ms total
+// delay is fine for these one-shot, user-/event-driven sends; bump the wake
+// delay if a first keystroke is still occasionally missed.
+void sendTriggerKeystroke() {
+  if (keyboardInput == nullptr) return;
+  uint8_t nullReport[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  uint8_t press[8]      = {0x00, 0x00, HID_KEY_TRIGGER, 0, 0, 0, 0, 0};
+
+  keyboardInput->setValue(nullReport, 8); keyboardInput->notify();  // wake the HID link
+  delay(150);                                                       // let the host re-attach
+  keyboardInput->setValue(press, 8);      keyboardInput->notify();  // key down
+  delay(50);
+  keyboardInput->setValue(nullReport, 8); keyboardInput->notify();  // key up
+}
+
 void drawBrightnessSettingsUI() {
   tft.fillScreen(THEME_BG);
   drawLeftBoxedText("BRIGHTNESS", 5, 5, COLOR_DARKBLUE);
@@ -2060,10 +2085,7 @@ void handleBtInfoTouch(TS_Point p) {
   if (btnBtInfoTest.contains(p.x, p.y)) {
     NimBLEServer* pServer = NimBLEDevice::getServer();
     if (pServer != nullptr && pServer->getConnectedCount() > 0) {
-      uint8_t press[8]   = {0x00, 0x00, HID_KEY_TRIGGER, 0x00, 0x00, 0x00, 0x00, 0x00};
-      uint8_t release[8] = {0x00, 0x00, 0x00,            0x00, 0x00, 0x00, 0x00, 0x00};
-      keyboardInput->setValue(press, 8);   keyboardInput->notify(); delay(50);
-      keyboardInput->setValue(release, 8); keyboardInput->notify();
+      sendTriggerKeystroke();
       btnBtInfoTest.draw(tft, "SENT!", COLOR_GREENYELLOW, TFT_BLACK);
       delay(500);
     } else {
@@ -2764,10 +2786,7 @@ void loop() {
   if (btTriggerPending && !isSequenceActive) {
     NimBLEServer* pBleRetry = NimBLEDevice::getServer();
     if (pBleRetry != nullptr && pBleRetry->getConnectedCount() > 0) {
-      uint8_t press[8]   = {0x00, 0x00, HID_KEY_TRIGGER, 0x00, 0x00, 0x00, 0x00, 0x00};
-      uint8_t release[8] = {0x00, 0x00, 0x00,            0x00, 0x00, 0x00, 0x00, 0x00};
-      keyboardInput->setValue(press, 8);   keyboardInput->notify(); delay(50);
-      keyboardInput->setValue(release, 8); keyboardInput->notify();
+      sendTriggerKeystroke();
       btTriggerPending = false;
     } else if ((unsigned long)(millis() - btTriggerPendingMs) > 60000) {
       btTriggerPending = false;
@@ -2893,10 +2912,7 @@ void loop() {
     if (totalActiveTime >= MIN_ACTIVE_DURATION) {
       NimBLEServer* pBleServer = NimBLEDevice::getServer();
       if (pBleServer != nullptr && pBleServer->getConnectedCount() > 0) {
-        uint8_t press[8]   = {0x00, 0x00, HID_KEY_TRIGGER, 0x00, 0x00, 0x00, 0x00, 0x00};
-        uint8_t release[8] = {0x00, 0x00, 0x00,            0x00, 0x00, 0x00, 0x00, 0x00};
-        keyboardInput->setValue(press, 8);   keyboardInput->notify(); delay(50);
-        keyboardInput->setValue(release, 8); keyboardInput->notify();
+        sendTriggerKeystroke();
       } else {
         // BLE dropped during the stack — retry once it reconnects (within 30 s)
         btTriggerPending = true;
