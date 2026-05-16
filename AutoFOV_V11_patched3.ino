@@ -627,8 +627,10 @@ unsigned long lastPulseTime = 0;
 bool btTriggerPending = false;
 unsigned long btTriggerPendingMs = 0;
 
-// BLE keep-alive: null HID report sent every 5 s while a stack is active so
-// iOS/Android don't drop the idle HID connection before stack complete fires.
+// BLE keep-alive: null HID report sent every 5 s whenever a BLE host is
+// connected so iOS/Android don't park the idle HID link. A parked link drops
+// the first report sent after it — which made stack-complete and the TEST
+// ALERT keystroke miss on the first try.
 unsigned long lastBLEKeepAliveMs = 0;
 
 bool lastBTState = false;
@@ -732,6 +734,7 @@ void handleWifiInfoTouch(TS_Point p);      // patched3
 void wifiForgetAndRestart();               // patched3: defined in patched3_wifi.ino
 const char* wifiGetPortalCode();           // patched3: random WPA2 code shown on TFT during setup
 void wifiNotifyStackComplete();            // patched3: BLE-free stack-done WS event
+void wifiNotifyTestAlert();                // pings webview beep on TEST ALERT press
 void redrawCurrentScreen();                // patched3: full repaint of currentMode
 void bleInitDeferred();                    // NimBLE bring-up — called from setup()
 void wifiPushSettings();                   // push buildSettingsJson to all WS clients
@@ -1616,7 +1619,7 @@ void fireTriggerLed(bool on) {
 // first keystroke. So lead with a "wake" null report + a short pause to bring
 // the link back up, then send the real key-down / key-up pair.
 //
-// Caller must have already confirmed a live BLE connection. The ~200 ms total
+// Caller must have already confirmed a live BLE connection. The ~350 ms total
 // delay is fine for these one-shot, user-/event-driven sends; bump the wake
 // delay if a first keystroke is still occasionally missed.
 void sendTriggerKeystroke() {
@@ -1625,7 +1628,7 @@ void sendTriggerKeystroke() {
   uint8_t press[8]      = {0x00, 0x00, HID_KEY_TRIGGER, 0, 0, 0, 0, 0};
 
   keyboardInput->setValue(nullReport, 8); keyboardInput->notify();  // wake the HID link
-  delay(150);                                                       // let the host re-attach
+  delay(300);                                                       // let the host re-attach
   keyboardInput->setValue(press, 8);      keyboardInput->notify();  // key down
   delay(50);
   keyboardInput->setValue(nullReport, 8); keyboardInput->notify();  // key up
@@ -2083,6 +2086,7 @@ void drawBtInfoUI() {
 
 void handleBtInfoTouch(TS_Point p) {
   if (btnBtInfoTest.contains(p.x, p.y)) {
+    wifiNotifyTestAlert();   // beep any connected dashboards — independent of BLE
     NimBLEServer* pServer = NimBLEDevice::getServer();
     if (pServer != nullptr && pServer->getConnectedCount() > 0) {
       sendTriggerKeystroke();
@@ -2894,9 +2898,11 @@ void loop() {
     registerActivity();
   }
 
-  // Send a null HID report every 5 s during an active stack so the phone's
-  // BLE host doesn't drop the idle HID connection before stack complete fires.
-  if (isSequenceActive && keyboardInput != nullptr) {
+  // Send a null HID report every 5 s whenever a BLE host is connected so the
+  // phone never parks the idle HID link. A parked link drops the first report
+  // sent after it, which otherwise made stack-complete and the TEST ALERT
+  // keystroke miss on the first press (see sendTriggerKeystroke()).
+  if (keyboardInput != nullptr) {
     NimBLEServer* pKA = NimBLEDevice::getServer();
     if (pKA != nullptr && pKA->getConnectedCount() > 0 &&
         (unsigned long)(millis() - lastBLEKeepAliveMs) >= 5000) {

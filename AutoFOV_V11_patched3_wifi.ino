@@ -1043,6 +1043,7 @@ static void handleWifiCommand(const char* key, const char* val) {
     // ── BLE test alert (sends HID F12 keypress) ───────────────────────────────
     // patched3: extra guard on keyboardInput (null until BLE is up).
     } else if (strcmp(key, "testAlert") == 0) {
+        wifiNotifyTestAlert();   // beep all dashboards — independent of BLE
         if (keyboardInput != nullptr && btConnHandle != 0xFFFF) {
             sendTriggerKeystroke();   // leads with a wake report — see main tab
         } else {
@@ -1310,6 +1311,15 @@ String wifiGetSSID()     { if (wifiServerMode == WMODE_PORTAL) return String(AP_
 void wifiNotifyStackComplete() {
     if (wsServer.count() == 0) return;
     wsServer.textAll("{\"stackDone\":1}");
+}
+
+// Called when the TEST ALERT button is pressed — on the device BT_INFO screen
+// or the web dashboard. Pings connected dashboards to play the alert beep: a
+// reliable, BLE-free confirmation channel (the BLE HID key can still miss its
+// first press on a long-idle link). Fires regardless of BLE connection state.
+void wifiNotifyTestAlert() {
+    if (wsServer.count() == 0) return;
+    wsServer.textAll("{\"beep\":1}");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
