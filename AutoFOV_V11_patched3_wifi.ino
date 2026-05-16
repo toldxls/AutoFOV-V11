@@ -287,18 +287,6 @@ void wifiLoop() {
     if (wifiServerMode == WMODE_PORTAL) {
         dnsServer.processNextRequest();
 
-        // patched3 DEBUG: heartbeat every 5 s so we can tell whether the AP
-        // is staying up + see when a client actually associates with us.
-        // Delete once the AP-broadcast issue is resolved.
-        static uint32_t lastApHb = 0;
-        if (millis() - lastApHb > 5000) {
-            lastApHb = millis();
-            Serial.printf("[WiFi] AP heartbeat — clients=%d  IP=%s  ch=%d  RSSI?=N/A\n",
-                          WiFi.softAPgetStationNum(),
-                          WiFi.softAPIP().toString().c_str(),
-                          WiFi.channel());
-            Serial.flush();
-        }
         return;   // no telemetry in portal mode
     }
 
@@ -1104,7 +1092,7 @@ static void buildFullStateJson(String& out, bool includeCalGraph) {
     doc["freeHeap"]   = ESP.getFreeHeap()    / 1024;
     doc["totalHeap"]  = ESP.getHeapSize()    / 1024;
     doc["lowestFree"] = ESP.getMinFreeHeap() / 1024;
-    doc["spriteKB"]   = 92;   // 240×48+240×45+80×40+44×12+120×40+240×67 = ~91.7 KB (PSRAM)
+    doc["spriteKB"]   = SPRITE_BYTES / 1024;
     doc["psramFree"]  = ESP.getFreePsram()   / 1024;
     doc["psramTotal"] = ESP.getPsramSize()   / 1024;
     doc["cpu"]        = getCpuFrequencyMhz();

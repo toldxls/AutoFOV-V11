@@ -345,6 +345,10 @@ PSRAMCanvas16 valSprite(120, 40);
 // fill→text→ring flicker that occurred on every 30 ms main-loop redraw.
 PSRAMCanvas16 objSprite(240, 67);
 
+// Total PSRAM consumed by the six sprites above (2 bytes/px).
+// Referenced by both drawMemInfoUI() and the wifi slow-telemetry path.
+const uint32_t SPRITE_BYTES = (240*48 + 240*45 + 80*40 + 44*12 + 120*40 + 240*67) * 2;
+
 void setSmoothFont(uint8_t size);
 
 // patched3: forward declarations for WiFi tab accessors (defined in patched3_wifi.ino).
@@ -976,9 +980,7 @@ void drawMemInfoUI() {
   drawLeftBoxedText("MEMORY & INFO", 5, 5, COLOR_DARKGREEN);
   btnMemClose.draw(tft);
 
-  // fovSprite 240x48, distSprite 240x45, menuSprite 80x40, barSprite 44x12,
-  // valSprite 120x40, objSprite 240x67  → 2 bytes/px → ~91.7 KB in PSRAM
-  const uint32_t spriteBytes = (240*48 + 240*45 + 80*40 + 44*12 + 120*40 + 240*67) * 2;
+  const uint32_t spriteBytes = SPRITE_BYTES;
 
   uint32_t freeHeap   = ESP.getFreeHeap();
   uint32_t totalHeap  = ESP.getHeapSize();
@@ -2463,11 +2465,6 @@ void sensorTask(void *pvParameters) {
 void setup() {
   Serial.begin(115200);
   delay(3000);
-
-  // patched3 DEBUG: aggressive boot tracing — DELETE this block once the AP
-  // broadcast issue is resolved.  Helps catch the very first events.
-  Serial.println("[BOOT] setup() entered");
-  Serial.flush();
 
   // Allocate sprite buffers now that PSRAM is fully initialised.
   // (Constructor is a no-op — see PSRAMCanvas16::begin() comment.)
