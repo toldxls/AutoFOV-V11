@@ -94,7 +94,7 @@ Three constants govern the whole trigger sequence (`AutoFOV_V11_patched3.ino:598
 When the stack is declared complete, the device sends the BLE F12 keystroke and a browser notification (3-beep audible cue) to any connected web dashboard. A run shorter than `MIN_ACTIVE_DURATION` is treated as a false start and is silently ignored. If your camera's interval between shots exceeds `SILENCE_DURATION`, raise that constant or the stack will falsely complete mid-run.
 
 ### Calibration
-If you change optics or sensors, run the built-in calibration:
+A set of "factory" calibration values is stored in memory but if you change optics or sensors, run the built-in calibration:
 1. Tap **CALIBRATE** on the main screen.
 2. Set your photo width (in pixels) and demarcation distance used to measure # of pixels between marks (0.4 mm default).
 3. Follow the on-screen prompts to capture multiple points (3 to 20) at varying distances.
