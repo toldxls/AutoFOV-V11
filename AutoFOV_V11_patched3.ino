@@ -976,10 +976,8 @@ void drawMemInfoUI() {
   drawLeftBoxedText("MEMORY & INFO", 5, 5, COLOR_DARKGREEN);
   btnMemClose.draw(tft);
 
-  // Sprite memory (static, compile-time known)
-  // fovSprite 240x48=22.5KB, distSprite 240x45=21.1KB,
-  // menuSprite 80x40=6.3KB, barSprite 44x12=1.0KB,
-  // valSprite 120x40=9.4KB, objSprite 240x67=31.4KB  → total ~91.7KB
+  // fovSprite 240x48, distSprite 240x45, menuSprite 80x40, barSprite 44x12,
+  // valSprite 120x40, objSprite 240x67  → 2 bytes/px → ~91.7 KB in PSRAM
   const uint32_t spriteBytes = (240*48 + 240*45 + 80*40 + 44*12 + 120*40 + 240*67) * 2;
 
   uint32_t freeHeap   = ESP.getFreeHeap();
@@ -987,55 +985,128 @@ void drawMemInfoUI() {
   uint32_t minFree    = ESP.getMinFreeHeap();
   uint32_t psramFree  = ESP.getFreePsram();
   uint32_t psramTotal = ESP.getPsramSize();
+  uint32_t usedHeap   = totalHeap > freeHeap ? totalHeap - freeHeap : 0;
 
   setSmoothFont(1);
   char buf[40];
-  int ly = 60;
-  const int lStep = 26;
 
-  auto memRow = [&](const char* label, const char* val, uint16_t col) {
+  // ── Bar color palette (RGB565) ────────────────────────────────────────
+  const uint16_t C_HEAP_USED  = 0xFD40;  // warm amber  — heap used
+  const uint16_t C_HEAP_FREE  = 0x03A0;  // dark green  — heap free bg
+  const uint16_t C_PSRAM_SPR  = 0x5011;  // purple      — sprite alloc
+  const uint16_t C_PSRAM_USE  = 0x2BBF;  // slate blue  — other PSRAM used
+  const uint16_t C_PSRAM_FREE = 0x03EF;  // dark teal   — free PSRAM
+
+  const int BX = 15, BW = 210, BH = 14, IW = BW - 2;
+
+  // ── Stacked horizontal usage bar ─────────────────────────────────────
+  // s1 = leftmost segment, s2 overlaid on far-left of s1, bgCol fills rest.
+  // lowestMark draws a white 2px tick at the historical high-water mark for used.
+  auto drawBar = [&](int by, uint32_t total,
+                     uint32_t s1, uint16_t c1,
+                     uint32_t s2, uint16_t c2,
+                     uint16_t bgCol, uint32_t lowestMark) {
+    if (total == 0) return;
+    tft.fillRoundRect(BX, by, BW, BH, 3, 0x1082);
+    tft.fillRect(BX+1, by+1, IW, BH-2, bgCol);
+    int w1 = constrain((int)((uint64_t)s1 * IW / total), 0, IW);
+    if (w1 > 0) tft.fillRect(BX+1, by+1, w1, BH-2, c1);
+    int w2 = constrain((int)((uint64_t)s2 * IW / total), 0, w1);
+    if (w2 > 0) tft.fillRect(BX+1, by+1, w2, BH-2, c2);
+    tft.drawRoundRect(BX, by, BW, BH, 3, 0x528A);
+    if (lowestMark > 0 && lowestMark < total) {
+      int tx = BX + 1 + constrain((int)((uint64_t)(total - lowestMark) * IW / total), 0, IW-2);
+      tft.fillRect(tx, by-3, 2, BH+6, TFT_WHITE);
+    }
+  };
+
+  // ── Heap bar (y=58) — "HEAP" label sits 7 px above ──────────────────
+  tft.setFont(NULL); tft.setTextSize(1);
+  tft.setTextColor(themedText(COLOR_LIGHTGREY));
+  tft.setCursor(BX + 2, 43); tft.print("HEAP");
+  setSmoothFont(1);
+  drawBar(58, totalHeap, usedHeap, C_HEAP_USED, 0, 0, C_HEAP_FREE, minFree);
+
+  // ── Heap legend — 3 stacked lines: [indicator] label   value ─────────
+  // Bar bottom = y=71.  FreeSans9 ascenders ~10 px above baseline; baseline
+  // at 96 puts cap-tops at 86 — 15 px clear of bar bottom.  Lines 20 px apart.
+  auto heapLeg = [&](int y, const char* label, const char* val,
+                      uint16_t valCol, bool isTick) {
+    if (isTick) tft.fillRect(15, y-10, 2, 11, TFT_WHITE);
+    else        tft.fillRect(15, y-9,  8,  8, valCol);
+    tft.setTextColor(themedText(COLOR_LIGHTGREY));
+    tft.setCursor(27, y); tft.print(label);
+    int16_t bx1, by1; uint16_t btw, bth;
+    tft.getTextBounds(val, 0, 0, &bx1, &by1, &btw, &bth);
+    tft.setTextColor(valCol);
+    tft.setCursor(228 - (int)btw - bx1, y); tft.print(val);
+  };
+
+  snprintf(buf, sizeof(buf), "%luK", usedHeap / 1024);
+  heapLeg( 96, "used", buf, C_HEAP_USED,    false);
+
+  snprintf(buf, sizeof(buf), "%luK", minFree / 1024);
+  heapLeg(116, "low",  buf, TFT_WHITE,       true);
+
+  snprintf(buf, sizeof(buf), "%luK/%luK", freeHeap/1024, totalHeap/1024);
+  heapLeg(136, "free", buf, C_HEAP_FREE,     false);
+
+  // ── PSRAM bar + legend (y=164, only when PSRAM present) ──────────────
+  // Default nextY (PSRAM absent): 8 px below "free" descent (~139).
+  int nextY = 147;
+  if (psramTotal > 0) {
+    uint32_t psramUsed = psramTotal > psramFree ? psramTotal - psramFree : 0;
+    uint32_t sprClamp  = min(spriteBytes, psramUsed);
+    tft.setFont(NULL); tft.setTextSize(1);
+    tft.setTextColor(themedText(COLOR_LIGHTGREY));
+    tft.setCursor(BX + 2, 149); tft.print("PSRAM");
+    setSmoothFont(1);
+    drawBar(164, psramTotal, psramUsed, C_PSRAM_USE, sprClamp, C_PSRAM_SPR, C_PSRAM_FREE, 0);
+
+    // bar bottom = y=178; pLY=196 puts ascenders at 186 — 8 px clear of bar
+    int pLY = 196;
+    snprintf(buf, sizeof(buf), "%luK spr", spriteBytes / 1024);
+    tft.fillRect(15, pLY-9, 8, 8, C_PSRAM_SPR);
+    tft.setTextColor(themedText(COLOR_LIGHTGREY));
+    tft.setCursor(27, pLY); tft.print(buf);
+
+    snprintf(buf, sizeof(buf), "%luK/%luK", psramFree/1024, psramTotal/1024);
+    int16_t x1, y1; uint16_t tw, th;
+    tft.getTextBounds(buf, 0, 0, &x1, &y1, &tw, &th);
+    int rX = 225 - (int)tw;
+    tft.fillRect(rX-12, pLY-9, 8, 8, C_PSRAM_FREE);
+    tft.setTextColor(C_PSRAM_FREE);
+    tft.setCursor(rX, pLY); tft.print(buf);
+
+    nextY = 203;
+  }
+
+  // ── Separator ─────────────────────────────────────────────────────────
+  tft.drawFastHLine(10, nextY+4, 220, 0x2965);
+
+  // ── System info ───────────────────────────────────────────────────────
+  int ly = nextY + 18;
+  auto infoRow = [&](const char* label, const char* val, uint16_t col) {
     tft.setTextColor(themedText(COLOR_LIGHTGREY)); tft.setCursor(15, ly); tft.print(label);
     int16_t x1, y1; uint16_t w, h;
     tft.getTextBounds(val, 0, 0, &x1, &y1, &w, &h);
-    tft.setTextColor(col); tft.setCursor(225 - w - x1, ly); tft.print(val);
-    ly += lStep;
+    tft.setTextColor(col); tft.setCursor(225 - (int)w - x1, ly); tft.print(val);
+    ly += 26;
   };
 
-  snprintf(buf, sizeof(buf), "%lu KB", freeHeap / 1024);
-  memRow("Free heap:", buf, freeHeap > 80000 ? COLOR_PUREGREEN : freeHeap > 40000 ? COLOR_YELLOW : COLOR_ORANGE);
-
-  snprintf(buf, sizeof(buf), "%lu KB", totalHeap / 1024);
-  memRow("Total heap:", buf, TFT_WHITE);
-
-  // "Lowest free" = the heap low-water mark since boot. Equal to "Free heap"
-  // when no major allocation has churned memory yet (typical at idle); diverges
-  // downward as soon as anything heavy runs (BLE pairing, sprite resize, etc.),
-  // exposing how close the device has come to OOM under real load.
-  snprintf(buf, sizeof(buf), "%lu KB", minFree / 1024);
-  memRow("Lowest free:", buf, minFree > 40000 ? COLOR_PUREGREEN : COLOR_ORANGE);
-
-  snprintf(buf, sizeof(buf), "%.1f KB", spriteBytes / 1024.0f);
-  memRow("Sprites alloc:", buf, COLOR_LIGHTGREY);
-
-  if (psramTotal > 0) {
-    snprintf(buf, sizeof(buf), "%lu KB", psramFree / 1024);
-    memRow("PSRAM free:", buf, COLOR_GREENYELLOW);
-    snprintf(buf, sizeof(buf), "%lu KB", psramTotal / 1024);
-    memRow("PSRAM total:", buf, TFT_WHITE);
-  } else {
-    memRow("PSRAM:", "none", COLOR_DARKGREY);
+  infoRow("Firmware:", FIRMWARE_VERSION, COLOR_GREENYELLOW);
+  {
+    char sdk[11]; snprintf(sdk, sizeof(sdk), "%s", ESP.getSdkVersion());
+    snprintf(buf, sizeof(buf), "%lu MHz-%s", (unsigned long)getCpuFrequencyMhz(), sdk);
+    infoRow("CPU:", buf, TFT_WHITE);
   }
-
-  ly += 6;  // extra gap before firmware section (no line)
-
-  // Firmware info
-  memRow("Firmware:", FIRMWARE_VERSION, COLOR_GREENYELLOW);
-  snprintf(buf, sizeof(buf), "%lu MHz", (unsigned long)getCpuFrequencyMhz());
-  memRow("CPU:", buf, TFT_WHITE);
-  snprintf(buf, sizeof(buf), "%s", ESP.getSdkVersion());
-  // truncate if too long
-  if (strlen(buf) > 14) buf[14] = 0;
-  memRow("SDK:", buf, COLOR_LIGHTGREY);
+  // Source file stats (4566 lines main + 1252 lines wifi = 5818; ~189KB + ~65KB = ~254KB)
+  infoRow("Source:", "5818 ln / ~254 KB", themedText(COLOR_LIGHTGREY));
+  {
+    uint32_t sk = ESP.getSketchSize(), ff = ESP.getFreeSketchSpace();
+    snprintf(buf, sizeof(buf), "%luK/%luK", sk/1024, (sk+ff)/1024);
+    infoRow("Flash:", buf, themedText(COLOR_LIGHTGREY));
+  }
 }
 
 void handleMemInfoTouch(TS_Point p) {

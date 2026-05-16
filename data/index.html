@@ -800,27 +800,71 @@
                 <div class="title-stripe" style="left: 5px; top: 5px; width: 115px; background-color: #006400;">MEMORY &amp; INFO</div>
                 <div class="gfx-btn btn-close-x" onclick="goBack('screen-settings')">X</div>
 
-                <div class="gfx-text" style="left: 15px; top: 60px;  color: var(--text-disabled);">Free heap:</div>
-                <div id="mem-free-heap" class="gfx-text" style="right: 15px; top: 60px;  color: #FFA500;">—</div>
-                <div class="gfx-text" style="left: 15px; top: 86px;  color: var(--text-disabled);">Total heap:</div>
-                <div id="mem-total-heap" class="gfx-text" style="right: 15px; top: 86px;  color: var(--text-primary);">—</div>
-                <div class="gfx-text" style="left: 15px; top: 112px; color: var(--text-disabled);">Lowest free:</div>
-                <div id="mem-lowest-free" class="gfx-text" style="right: 15px; top: 112px; color: #FFA500;">—</div>
-                <div class="gfx-text" style="left: 15px; top: 138px; color: var(--text-disabled);">Sprites alloc:</div>
-                <div id="mem-sprites" class="gfx-text" style="right: 15px; top: 138px; color: var(--text-disabled);">—</div>
-                <div class="gfx-text" style="left: 15px; top: 164px; color: var(--text-disabled);">PSRAM free:</div>
-                <div class="gfx-text" style="right: 15px; top: 164px; color: var(--accent-green);" id="mem-psram-free">none</div>
-                <div class="gfx-text" style="left: 15px; top: 190px; color: var(--text-disabled);">PSRAM total:</div>
-                <div class="gfx-text" style="right: 15px; top: 190px; color: var(--text-primary);" id="mem-psram-total">none</div>
+                <!-- Heap bar -->
+                <div style="position:absolute; left:17px; top:40px; font-size:9px; color:#666;">HEAP</div>
+                <div style="position:absolute; left:15px; top:50px; width:210px; height:14px;">
+                    <div style="position:absolute; inset:0; border-radius:3px; border:1px solid #444; overflow:hidden;">
+                        <div style="position:absolute; inset:0; background:#004800;"></div>
+                        <div id="mem-bar-used" style="position:absolute; top:0; left:0; bottom:0; background:#FD8000; width:0%;"></div>
+                    </div>
+                    <div id="mem-bar-low-tick" style="position:absolute; top:-3px; width:2px; height:20px; background:#fff; left:0%; display:none;"></div>
+                </div>
+                <!-- Heap legend: used | lowest | free/total -->
+                <div style="position:absolute; left:15px; top:68px; width:210px; display:flex; justify-content:space-between; align-items:center; font-size:10px;">
+                    <span>
+                        <span style="display:inline-block; width:8px; height:8px; background:#FD8000; vertical-align:middle; margin-right:3px;"></span>
+                        <span id="ml-used" style="color:#FD8000; vertical-align:middle;">—K</span>
+                        <span style="color:#555; font-size:9px; vertical-align:middle;"> used</span>
+                    </span>
+                    <span>
+                        <span style="display:inline-block; width:2px; height:10px; background:#ccc; vertical-align:middle; margin-right:3px;"></span>
+                        <span id="ml-low" style="color:#ccc; vertical-align:middle;">—K</span>
+                        <span style="color:#555; font-size:9px; vertical-align:middle;"> low</span>
+                    </span>
+                    <span>
+                        <span style="display:inline-block; width:8px; height:8px; background:#007500; vertical-align:middle; margin-right:3px;"></span>
+                        <span id="ml-free" style="color:#007500; vertical-align:middle;">—K/—K</span>
+                        <span style="color:#555; font-size:9px; vertical-align:middle;"> free</span>
+                    </span>
+                </div>
 
-                <div style="position: absolute; left: 10px; top: 215px; width: 220px; height: 1px; background: #404040;"></div>
+                <!-- PSRAM bar + legend (hidden when no PSRAM) -->
+                <div id="mem-psram-section">
+                    <div style="position:absolute; left:17px; top:88px; font-size:9px; color:#666;">PSRAM</div>
+                    <div style="position:absolute; left:15px; top:101px; width:210px; height:14px;">
+                        <div style="position:absolute; inset:0; border-radius:3px; border:1px solid #444; overflow:hidden;">
+                            <div style="position:absolute; inset:0; background:#007878;"></div>
+                            <div id="mem-psram-bar-used"    style="position:absolute; top:0; left:0; bottom:0; background:#2266CC; width:0%;"></div>
+                            <div id="mem-psram-bar-sprites" style="position:absolute; top:0; left:0; bottom:0; background:#6611CC; width:0%;"></div>
+                        </div>
+                    </div>
+                    <div style="position:absolute; left:15px; top:120px; width:210px; display:flex; justify-content:space-between; align-items:center; font-size:10px;">
+                        <span>
+                            <span style="display:inline-block; width:8px; height:8px; background:#6611CC; vertical-align:middle; margin-right:3px;"></span>
+                            <span id="ml-spr" style="color:#9966FF; vertical-align:middle;">—K</span>
+                            <span style="color:#555; font-size:9px; vertical-align:middle;"> spr</span>
+                        </span>
+                        <span>
+                            <span style="display:inline-block; width:8px; height:8px; background:#007878; vertical-align:middle; margin-right:3px;"></span>
+                            <span id="ml-pfree" style="color:#00BCBC; vertical-align:middle;">—K/—K free</span>
+                        </span>
+                    </div>
+                </div>
 
-                <div class="gfx-text" style="left: 15px; top: 222px; color: var(--text-disabled);">Firmware:</div>
-                <div class="gfx-text" style="right: 15px; top: 222px; color: var(--accent-green);">Auto FOV V11</div>
-                <div class="gfx-text" style="left: 15px; top: 248px; color: var(--text-disabled);">CPU:</div>
-                <div id="mem-cpu" class="gfx-text" style="right: 15px; top: 248px; color: var(--text-primary);">240 MHz</div>
-                <div class="gfx-text" style="left: 15px; top: 274px; color: var(--text-disabled);">SDK:</div>
-                <div class="gfx-text" style="right: 15px; top: 274px; color: var(--text-disabled);" id="mem-sdk">5.1.2</div>
+                <!-- Separator -->
+                <div id="mem-separator" style="position:absolute; left:10px; top:149px; width:220px; height:1px; background:#333;"></div>
+
+                <!-- System info rows -->
+                <div class="gfx-text" style="left:15px; top:163px; color:var(--text-disabled);">Firmware:</div>
+                <div class="gfx-text" style="right:15px; top:163px; color:var(--accent-green);">Auto FOV V11</div>
+                <div class="gfx-text" style="left:15px; top:189px; color:var(--text-disabled);">CPU:</div>
+                <div id="mem-cpu" class="gfx-text" style="right:15px; top:189px; color:var(--text-primary);">240 MHz</div>
+                <div class="gfx-text" style="left:15px; top:215px; color:var(--text-disabled);">SDK:</div>
+                <div id="mem-sdk" class="gfx-text" style="right:15px; top:215px; color:var(--text-disabled);">5.1.2</div>
+                <div class="gfx-text" style="left:15px; top:241px; color:var(--text-disabled);">Source:</div>
+                <div id="mem-source" class="gfx-text" style="right:15px; top:241px; color:var(--text-disabled);">—</div>
+                <div class="gfx-text" style="left:15px; top:267px; color:var(--text-disabled);">Flash:</div>
+                <div id="mem-flash" class="gfx-text" style="right:15px; top:267px; color:var(--text-disabled);">—</div>
             </div>
 
             <!-- ===================== CAL REVIEW ===================== -->
@@ -954,9 +998,10 @@
         sensorSignal: null, sensorAmbient: null, sensorStatusCode: null,
         // Memory (filled from device telemetry)
         freeHeap: null, totalHeap: null, lowestFree: null, spriteKB: null, cpu: 240,
+        psramFree: null, psramTotal: null,
         // About / build info (fallbacks shown until device connects and overrides)
         buildDate: '—', buildTime: '—', sketchKB: null, freeFlashKB: null,
-        sourceLines: 3866, chipInfo: 'ESP32-S3',
+        sourceLines: 5818, chipInfo: 'ESP32-S3',
         // WiFi info
         wifiSSID: null, wifiRSSI: null,
         // isCustomCalib flag (false = factory defaults shown)
@@ -1656,14 +1701,51 @@
     // ─────────────────────────────────────────────────────────────────────────
     function updateMemoryUI() {
         const g = (id) => document.getElementById(id);
-        if (g('mem-free-heap'))  g('mem-free-heap').innerText   = state.freeHeap   !== null ? state.freeHeap   + ' KB' : '—';
-        if (g('mem-total-heap')) g('mem-total-heap').innerText  = state.totalHeap  !== null ? state.totalHeap  + ' KB' : '—';
-        if (g('mem-lowest-free'))g('mem-lowest-free').innerText = state.lowestFree !== null ? state.lowestFree + ' KB' : '—';
-        if (g('mem-sprites'))    g('mem-sprites').innerText     = state.spriteKB   !== null ? state.spriteKB   + ' KB' : '—';
-        if (g('mem-psram-free')) g('mem-psram-free').innerText  = state.psramFree  !== undefined ? state.psramFree  + ' KB' : '—';
-        if (g('mem-psram-total'))g('mem-psram-total').innerText = state.psramTotal !== undefined ? state.psramTotal + ' KB' : '—';
-        if (g('mem-cpu'))        g('mem-cpu').innerText         = state.cpu + ' MHz';
-        if (g('mem-sdk'))        g('mem-sdk').innerText         = state.sdk || '—';
+
+        // Heap bar + legend
+        if (state.totalHeap > 0) {
+            const usedKB  = state.totalHeap - (state.freeHeap || 0);
+            const lowKB   = state.lowestFree !== null ? state.lowestFree : (state.freeHeap || 0);
+            const pUsed   = usedKB / state.totalHeap;
+            const pLow    = (state.totalHeap - lowKB) / state.totalHeap;
+            if (g('mem-bar-used')) g('mem-bar-used').style.width = (pUsed * 100).toFixed(1) + '%';
+            const tick = g('mem-bar-low-tick');
+            if (tick) {
+                tick.style.left    = (pLow * 100).toFixed(1) + '%';
+                tick.style.display = (lowKB < (state.freeHeap || 0)) ? '' : 'none';
+            }
+            if (g('ml-used')) g('ml-used').textContent = usedKB + 'K';
+            if (g('ml-low'))  g('ml-low').textContent  = lowKB  + 'K';
+            if (g('ml-free')) g('ml-free').textContent = (state.freeHeap || 0) + 'K/' + state.totalHeap + 'K';
+        }
+
+        // PSRAM bar + legend
+        const hasPsram = state.psramTotal > 0;
+        if (g('mem-psram-section')) g('mem-psram-section').style.display = hasPsram ? '' : 'none';
+        if (g('mem-separator'))     g('mem-separator').style.top         = hasPsram ? '149px' : '84px';
+        if (hasPsram) {
+            const psUsedKB = state.psramTotal - (state.psramFree || 0);
+            const sprKB    = state.spriteKB || 92;
+            const pPsUsed  = psUsedKB / state.psramTotal;
+            const pPsSpr   = Math.min(sprKB, psUsedKB) / state.psramTotal;
+            if (g('mem-psram-bar-used'))    g('mem-psram-bar-used').style.width    = (pPsUsed * 100).toFixed(1) + '%';
+            if (g('mem-psram-bar-sprites')) g('mem-psram-bar-sprites').style.width = (pPsSpr  * 100).toFixed(1) + '%';
+            if (g('ml-spr'))   g('ml-spr').textContent   = sprKB + 'K';
+            if (g('ml-pfree')) g('ml-pfree').textContent = (state.psramFree || 0) + 'K/' + state.psramTotal + 'K free';
+        }
+
+        // System info
+        if (g('mem-cpu'))    g('mem-cpu').innerText    = state.cpu + ' MHz';
+        if (g('mem-sdk'))    g('mem-sdk').innerText    = state.sdk || '—';
+        if (g('mem-source')) g('mem-source').innerText = state.sourceLines
+            ? state.sourceLines + ' ln / ~254 KB'
+            : '5818 ln / ~254 KB';
+        if (g('mem-flash')) {
+            const sk = state.sketchKB, ff = state.freeFlashKB;
+            g('mem-flash').innerText = (sk !== null && ff !== null)
+                ? sk + 'K/' + (sk + ff) + 'K'
+                : '—';
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2177,8 +2259,8 @@
         let aboutDirty = false;
         if (data.buildDate   !== undefined) { state.buildDate   = data.buildDate;   aboutDirty = true; }
         if (data.buildTime   !== undefined) { state.buildTime   = data.buildTime;   aboutDirty = true; }
-        if (data.sketchKB    !== undefined) { state.sketchKB    = data.sketchKB;    aboutDirty = true; }
-        if (data.freeFlashKB !== undefined) { state.freeFlashKB = data.freeFlashKB; aboutDirty = true; }
+        if (data.sketchKB    !== undefined) { state.sketchKB    = data.sketchKB;    aboutDirty = true; memDirty = true; }
+        if (data.freeFlashKB !== undefined) { state.freeFlashKB = data.freeFlashKB; aboutDirty = true; memDirty = true; }
         if (data.sourceLines !== undefined) { state.sourceLines = data.sourceLines; aboutDirty = true; }
         if (data.chipInfo    !== undefined) { state.chipInfo    = data.chipInfo;    aboutDirty = true; }
         if (aboutDirty && state.screen === 'screen-about') updateAboutUI();
