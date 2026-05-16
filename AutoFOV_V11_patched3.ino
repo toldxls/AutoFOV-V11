@@ -2087,8 +2087,23 @@ void refreshWifiInfoValues() {
     sensorRow("RSSI:", rssiBuf, rssiCol, 106);
     sensorRow("Mode:", "STA (connected)", themedText(COLOR_LIGHTGREY), 138);
   } else if (wifiIsPortal()) {
-    sensorRow("Password:", wifiGetPortalCode(), COLOR_ORANGE, 106);
-    sensorRow("Mode:", "AP setup portal",       COLOR_ORANGE, 138);
+    // Password row drawn by hand (not sensorRow) so the setup code can use
+    // FreeSans12 — one size up from the FreeSans9 every other row uses. It's
+    // the one value the user must read off and type into their phone, so it
+    // gets the visual weight. Label stays FreeSans9 for row consistency.
+    const char* code = wifiGetPortalCode();
+    distSprite.fillScreen(THEME_BG);
+    distSprite.setTextSize(1);
+    distSprite.setFont(&FreeSans9pt7b);
+    distSprite.setTextColor(themedText(COLOR_LIGHTGREY));
+    distSprite.setCursor(10, 24); distSprite.print("Password:");
+    distSprite.setFont(&FreeSans12pt7b);
+    distSprite.setTextColor(COLOR_ORANGE);
+    int16_t cx1, cy1; uint16_t cw, ch;
+    distSprite.getTextBounds(code, 0, 0, &cx1, &cy1, &cw, &ch);
+    distSprite.setCursor(230 - cw - cx1, 24); distSprite.print(code);
+    tft.drawRGBBitmap(0, 106, distSprite.getBuffer(), 240, 30);
+    sensorRow("Mode:", "AP setup portal", COLOR_ORANGE, 138);
   } else {
     sensorRow("RSSI:", "---",              themedText(COLOR_DARKGREY), 106);
     sensorRow("Mode:", "STA (offline)",    COLOR_RED, 138);
