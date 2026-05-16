@@ -147,6 +147,12 @@ int themeIntensity = 50;
 // ~500ms after the last drag sample, or immediately on theme tap / GO BACK.
 bool displayPrefsDirty = false;
 unsigned long lastTintDragMs = 0;
+// patched3: WS commands (brightness / LED duty / secStep) used to write the
+// full CalibData blob to NVS on every message — a web slider drag is dozens
+// of flash writes. Mark the "calib" namespace dirty instead; loop() flushes
+// once ~500 ms after the last edit (mirrors the displayPrefsDirty pattern).
+bool calibPrefsDirty = false;
+unsigned long lastCalibEditMs = 0;
 // patched3: when a WS-driven theme/tint change arrives we defer the TFT
 // repaint by the same 500 ms window used for NVS save.  A rapid tint-drag
 // stream from the HTML thus collapses into a single redraw on drag-end,
@@ -416,9 +422,6 @@ Button btnSettingsGear(190, 0, 50, 50);
 // pushes buttons down so users can drag the slider without grazing STACK CALC.
 Button btnStackCalc(20, 127, 200, 35, "STACK CALC",    COLOR_BLUEGREEN, TFT_WHITE, 1, true);
 Button btnBrightness(20, 172, 200, 35, "BRIGHTNESS",   COLOR_DARKBLUE,  TFT_WHITE, 1, true);
-// TEST BT + RESET BT side-by-side: x=10 w=100 and x=120 w=110, y=195 h=50
-Button btnTestBT(10,  215, 100, 48, "TEST BT",        COLOR_PURPLE,    TFT_WHITE, 1, true);
-Button btnResetBT(120, 215, 110, 48, "RESET BT",      COLOR_MAROON,    TFT_WHITE, 1, true);
 Button btnGoBack(20, 265, 200, 35, "GO BACK",           TFT_BLACK,       TFT_WHITE, 1, true);
 Button btnSettingsClose(205, 2, 33, 33, "X", 0x4208, COLOR_RED, 2, true); // X close for settings
 Button btnSettingsMem(20, 217, 200, 38, "MEMORY", COLOR_BLUEGREEN, TFT_BLACK, 1, true);
@@ -470,8 +473,6 @@ Button btnGraphBack(205, 2, 33, 33, "X", 0x4208, COLOR_RED, 2, true);  // X clos
 Button btnBrightBack(60, 274, 120, 40, "GO BACK", TFT_BLACK, TFT_WHITE, 1, true);
 Button btnLedToggle(155, 148, 75, 26, "OFF", COLOR_MAROON, TFT_WHITE, 1, true);
 Button btnScreenTimeouts(20, 226, 200, 32, "SCREEN TIMEOUTS", COLOR_TEAL, TFT_WHITE, 1, true);
-// Brightness screen: which slider is selected: 0=screen, 1=LED
-int brightnessSelection = 0;
 
 // --- SCREEN_TIMEOUT screen (V11) — adjustable dim/sleep + theme picker ---
 // V11 polish: dim row pulled up to y=68 and sleep row to y=140 so labels
@@ -522,12 +523,19 @@ struct __attribute__((packed)) CalibData {
   uint8_t ledDuty;      // V17b: LED PWM duty 0-255 (active-low: higher = dimmer)
   uint8_t _pad;
   float calibR2;        // V17: persisted R²
+  // V11 fix: persist the calibration scatter points so the CAL_GRAPH plot
+  // (and the web graph) survive a reboot. Without these, a custom-calibrated
+  // device reloaded distPoints[]/fovPoints[] as all-zero after a power-cycle.
+  int32_t calNPoints;        // nPoints used for the stored fit
+  int32_t calPointsCaptured; // valid slot count in the two arrays below
+  float   calDistPoints[20];
+  float   calFovPoints[20];
 };
 CalibData settings;
 
 // V17: Magic bumped because CalibData layout grew (calibR2 added).
 // Devices upgrading from V16 will see a one-time return to defaults.
-#define CALIB_MAGIC 0x544F4C4B  // V19: bumped to reset ledEnabled default to ON
+#define CALIB_MAGIC 0x544F4C4C  // V11: bumped — CalibData now persists calibration scatter points
 
 bool isCustomCalib = false;
 int currentBrightness = Config::DEFAULT_BRIGHTNESS;
@@ -586,7 +594,6 @@ const int REVIEW_LIST_TOP = 45;
 std::atomic<uint32_t> sensorState{0};
 std::atomic<uint32_t> sensorHealth{0};
 std::atomic<uint32_t> sensorAmbient{0};   // V17b: ambient Mcps * 1000 (24 bits)
-std::atomic<uint32_t> sensorSigma{0};     // V17b: range sigma mm * 100 (16 bits) | reflectance% (8 bits)
 std::atomic<uint32_t> sensorErrInt{1};    // 2σ FOV error bound × 100 (centimillimeters); written by updateDisplay()
 std::atomic<uint32_t> sensorAvgDist{0};  // 5-sample rolling-avg distance × 10 (tenths of mm); written by updateDisplay()
 std::atomic<bool>     sensorEmaReset{false}; // V17b: request EMA reset after wake
@@ -779,7 +786,11 @@ void drawCalGraphUI() {
 
   // Guard: with no points, the array reads below would be uninitialised.
   // Show a friendly placeholder and bail out instead of plotting garbage.
-  if (nPoints <= 0) {
+  // V11 fix: bound the plot by pointsCaptured (slots actually filled), NOT
+  // nPoints — the latter is the target count for the *next* calibration and
+  // can exceed the filled slots if the user edits "Cal Points" in CAL_SETTINGS.
+  int n = constrain(pointsCaptured, 0, 20);
+  if (n <= 0) {
     btnGraphBack.draw(tft);
     setSmoothFont(1);
     tft.setTextColor(themedText(COLOR_LIGHTGREY));
@@ -818,7 +829,7 @@ void drawCalGraphUI() {
   // ── Data range ──
   float xMin = distPoints[0], xMax = distPoints[0];
   float yMin = fovPoints[0],  yMax = fovPoints[0];
-  for (int i = 1; i < nPoints; i++) {
+  for (int i = 1; i < n; i++) {
     if (distPoints[i] < xMin) xMin = distPoints[i];
     if (distPoints[i] > xMax) xMax = distPoints[i];
     if (fovPoints[i]  < yMin) yMin = fovPoints[i];
@@ -882,7 +893,7 @@ void drawCalGraphUI() {
   tft.drawLine(rx0, ry0, rx1, ry1, COLOR_BLUEGREEN);
 
   // ── Data points — colour by residual magnitude ──
-  for (int i = 0; i < nPoints; i++) {
+  for (int i = 0; i < n; i++) {
     float predicted = CTRLX * distPoints[i] + CTRLY;
     float resid = fovPoints[i] - predicted;
     bool within = fabsf(resid) < CALIB_ERROR;
@@ -1102,8 +1113,6 @@ void drawMemInfoUI() {
     snprintf(buf, sizeof(buf), "%lu MHz-%s", (unsigned long)getCpuFrequencyMhz(), sdk);
     infoRow("CPU:", buf, TFT_WHITE);
   }
-  // Source file stats (4566 lines main + 1252 lines wifi = 5818; ~189KB + ~65KB = ~254KB)
-  infoRow("Source:", "5818 ln / ~254 KB", themedText(COLOR_LIGHTGREY));
   {
     uint32_t sk = ESP.getSketchSize(), ff = ESP.getFreeSketchSpace();
     snprintf(buf, sizeof(buf), "%luK/%luK", sk/1024, (sk+ff)/1024);
@@ -1173,7 +1182,6 @@ void drawAboutUI() {
   uint32_t freeKB = ESP.getFreeSketchSpace() / 1024;
   snprintf(buf, sizeof(buf), "%lu KB", (unsigned long)freeKB);
   row("Free flash:", buf, COLOR_LIGHTGREY);
-  row("Source:", "~5700 lines", COLOR_LIGHTGREY);
 
   // Chip identity — useful when comparing units / debugging in the field.
   snprintf(buf, sizeof(buf), "%s rev%d", ESP.getChipModel(), ESP.getChipRevision());
@@ -1596,18 +1604,6 @@ void fireTriggerLed(bool on) {
   } else {
     analogWrite(TRIGGER_LED_PIN, 255 - currentLedDuty); // active-low: on
   }
-}
-
-void drawBrightnessBar(int y, int value, uint16_t activeCol) {
-  // Compact horizontal bar: x=15..225, h=18
-  int barX = 15, barW = 210, barH = 18;
-  int filled = map(value, 0, 255, 0, barW);
-  // Rounded slider: full dark track, rounded active pill on top, border last.
-  tft.fillRoundRect(barX, y, barW, barH, 2, COLOR_DARKGREY);
-  if (filled > 4) {
-    tft.fillRoundRect(barX, y, filled, barH, 2, activeCol);
-  }
-  tft.drawRoundRect(barX, y, barW, barH, 2, COLOR_LIGHTGREY);
 }
 
 void drawBrightnessSettingsUI() {
@@ -2530,6 +2526,19 @@ void setup() {
 
     isCustomCalib = (settings.isCustom != 0);
 
+    // V11 fix: restore the persisted calibration scatter points so CAL_GRAPH
+    // and the web graph can plot them after a power-cycle.
+    if (isCustomCalib && settings.calPointsCaptured > 0 &&
+        settings.calPointsCaptured <= 20) {
+      nPoints        = constrain((int)settings.calNPoints,
+                                 Config::MIN_CALIB_POINTS, Config::MAX_CALIB_POINTS);
+      pointsCaptured = constrain((int)settings.calPointsCaptured, 0, 20);
+      for (int i = 0; i < pointsCaptured; i++) {
+        distPoints[i] = settings.calDistPoints[i];
+        fovPoints[i]  = settings.calFovPoints[i];
+      }
+    }
+
     if (settings.brightness < 1 || settings.brightness > 255) settings.brightness = Config::DEFAULT_BRIGHTNESS;
     currentBrightness = settings.brightness;
     
@@ -2566,6 +2575,8 @@ void setup() {
     settings.ledDuty = TRIGGER_LED_DUTY;
     settings._pad = 0;
     settings.calibR2 = 0.994f;
+    settings.calNPoints = 0;
+    settings.calPointsCaptured = 0;
     currentBrightness = Config::DEFAULT_BRIGHTNESS;
     isCustomCalib = false;
     preferences.putBytes("settings", &settings, sizeof(CalibData));
@@ -2718,6 +2729,14 @@ void loop() {
     saveDisplayPrefs();
   }
 
+  // patched3: deferred "calib" namespace save — WS settings edits (brightness,
+  // LED duty, secStep) mark calibPrefsDirty instead of writing flash per
+  // message; flush once ~500 ms after the last edit. See calibPrefsDirty decl.
+  if (calibPrefsDirty && (millis() - lastCalibEditMs) > 500) {
+    saveAllSettings();
+    calibPrefsDirty = false;
+  }
+
   // patched3: deferred WS-driven repaint.  WebSocket theme/tint commands set
   // displayNeedsRedraw and stamp lastTintDragMs.  When a rapid HTML tint-drag
   // stream subsides for 500 ms, we redraw the current screen once (rather
@@ -2839,7 +2858,7 @@ void loop() {
   } else if (!validTrigger && shutterActive) {
     fireTriggerLed(false);
     if (currentMode == MAIN) {
-      tft.fillCircle(113, 298, 8, TFT_BLACK);
+      tft.fillCircle(113, 298, 8, THEME_BG);
     }
     shutterActive = false;
   }
@@ -3162,7 +3181,7 @@ void handleAppSettingsTouch(TS_Point p) {
     currentMode = STACK_CALC; stackCalcSelection = 0; drawStackCalcUI(); return;
   }
   if (btnBrightness.contains(p.x, p.y)) {
-    currentMode = BRIGHTNESS_SETTINGS; brightnessSelection = 0; drawBrightnessSettingsUI(); return;
+    currentMode = BRIGHTNESS_SETTINGS; drawBrightnessSettingsUI(); return;
   }
   if (btnSettingsMem.contains(p.x, p.y)) {
     currentMode = MEM_INFO; drawMemInfoUI(); return;
@@ -3343,6 +3362,7 @@ void handleFovInfoTouch(TS_Point p) {
   if (btnInfoBack.contains(p.x, p.y) || btnInfoGraph.contains(p.x, p.y)) {
     if (!isCustomCalib) {
       nPoints = FACTORY_N;
+      pointsCaptured = FACTORY_N;   // V11 fix: CAL_GRAPH bounds the plot by this
       for (int i = 0; i < FACTORY_N; i++) {
         distPoints[i] = FACTORY_DIST[i];
         fovPoints[i]  = FACTORY_FOV[i];
@@ -3461,7 +3481,7 @@ void drawSignalHealthBar(uint8_t status, float mcps, int x, int y, bool toSprite
   int filled = max(1, (int)(fillFrac * (barW - 2)));
 
   if (toSprite) {
-    menuSprite.fillRect(x, y, barW, barH, TFT_BLACK);
+    menuSprite.fillRect(x, y, barW, barH, THEME_BG);
     menuSprite.drawRect(x, y, barW, barH, COLOR_DARKGREY);
     menuSprite.fillRect(x + 1, y + 1, filled, barH - 2, color);
   } else {
@@ -3512,6 +3532,14 @@ void finalizeCalibration() {
   settings.calibError = CALIB_ERROR; settings.brightness = currentBrightness;
   settings.isCustom = 1;
   settings.calibR2 = CALIB_R2;        // V17: persist R²
+
+  // V11 fix: persist the scatter points so CAL_GRAPH survives a reboot.
+  settings.calNPoints        = nPoints;
+  settings.calPointsCaptured = pointsCaptured;
+  for (int i = 0; i < 20; i++) {
+    settings.calDistPoints[i] = (i < pointsCaptured) ? distPoints[i] : 0.0f;
+    settings.calFovPoints[i]  = (i < pointsCaptured) ? fovPoints[i]  : 0.0f;
+  }
   
   preferences.begin("calib", false);
   preferences.putBytes("settings", &settings, sizeof(CalibData));
@@ -4076,8 +4104,8 @@ void drawCalReviewUI() {
       int rowY = REVIEW_LIST_TOP + r * REVIEW_ROW_HEIGHT;
       bool selected = (idx == reviewSelected);
 
-      uint16_t bgCol = selected ? COLOR_DARKBLUE : TFT_BLACK;
-      uint16_t fgCol = selected ? COLOR_GREENYELLOW : TFT_WHITE;
+      uint16_t bgCol = selected ? COLOR_DARKBLUE : THEME_BG;
+      uint16_t fgCol = selected ? COLOR_GREENYELLOW : themedText(TFT_WHITE);
 
       // Row background — leave gap on right for scroll buttons (x=195+)
       tft.fillRect(5, rowY, 185, REVIEW_ROW_HEIGHT - 2, bgCol);
@@ -4352,7 +4380,7 @@ void resetToFactory() {
   sensorWidthPixels = Config::DEFAULT_SENSOR_WIDTH_PX; demarcationDist = Config::DEFAULT_DEMARCATION_MM;
   nPoints = 10;  // sensible default; user can adjust between MIN_CALIB_POINTS and MAX_CALIB_POINTS
   CALIB_ERROR = Config::DEFAULT_CALIB_ERROR; isCustomCalib = false;
-  CALIB_R2 = 1.0f;             // V17: also reset R²
+  CALIB_R2 = 0.994f;           // factory-default R² (matches boot-load fallback)
   pointsCaptured = 0;          // V17: clear captured points
   isRetakeMode = false;
   

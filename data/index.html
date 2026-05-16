@@ -1049,11 +1049,13 @@
     function switchScreen(id) {
         screenHistory.push(state.screen);
         _showScreen(id);
+        sendCommand('nav', id);   // mirror the navigation onto the device TFT
     }
 
     function goBack(fallback) {
         const prev = screenHistory.pop() || fallback;
         _showScreen(prev);
+        sendCommand('nav', prev); // mirror the navigation onto the device TFT
     }
 
     function _showScreen(id) {
@@ -2097,6 +2099,15 @@
         if (data.t  !== undefined) data.trigger       = data.t;
         if (data.wr !== undefined) data.wifiRSSI      = data.wr;
         if (data.br !== undefined) data.btRSSI        = data.br;
+
+        // ── patched3: remote menu navigation (device → web) ──
+        // The device broadcasts {"screen":"screen-xxx"} when its menu changes.
+        // Apply via _showScreen() directly — switchScreen/goBack would echo a
+        // 'nav' command straight back to the device. The id-equality check is a
+        // second echo guard for a web-initiated change that round-tripped.
+        if (data.screen !== undefined && data.screen !== state.screen) {
+            _showScreen(data.screen);
+        }
 
         // ── Main screen live values (FOV + distance) ──
         // Buffer every incoming value; flush to DOM at most 3 Hz so the

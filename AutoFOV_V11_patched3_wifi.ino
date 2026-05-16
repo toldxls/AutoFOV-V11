@@ -175,6 +175,55 @@ static void buildSlowTelemJson(String& out);
 static void buildSettingsJson(String& out);
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SCREEN-NAVIGATION SYNC  —  mirrors the device menu ↔ the web dashboard menu.
+//   The web sends {"nav":"screen-xxx"} when the user navigates; the device
+//   broadcasts {"screen":"screen-xxx"} from wifiLoop() when currentMode changes.
+//   The "simple" menus and the read-only FOV-info / cal-graph screens sync;
+//   the interactive calibration capture flow (CAL_SETTINGS/RUN/SAMPLING/REVIEW/
+//   SUCCESS/CONFIRM) is deliberately excluded, and a remote nav is ignored
+//   while the device is in that flow so the web can't interrupt a calibration.
+//   Defined here, ahead of wifiLoop(), which both reads and writes it.
+// ─────────────────────────────────────────────────────────────────────────────
+struct ScreenMapEntry { DisplayMode mode; const char* id; };
+static const ScreenMapEntry kScreenMap[] = {
+    { MAIN,                "screen-main"       },
+    { APP_SETTINGS,        "screen-settings"   },
+    { STACK_CALC,          "screen-stackcalc"  },
+    { STACK_TIME,          "screen-stacktime"  },
+    { BRIGHTNESS_SETTINGS, "screen-brightness" },
+    { SCREEN_TIMEOUT,      "screen-timeout"    },
+    { SENSOR_INFO,         "screen-sensorinfo" },
+    { BT_INFO,             "screen-btinfo"     },
+    { MEM_INFO,            "screen-memory"     },
+    { FOV_INFO,            "screen-fovinfo"    },
+    { CAL_GRAPH,           "screen-calgraph"   },
+    { ABOUT,               "screen-about"      },
+    { WIFI_INFO,           "screen-wifiinfo"   },
+};
+static const size_t kScreenMapLen = sizeof(kScreenMap) / sizeof(kScreenMap[0]);
+
+// currentMode value last reflected to / received from the web — the echo guard.
+// Written by both the wifiLoop() broadcast poll and the "nav" command handler.
+static DisplayMode lastSyncedMode = MAIN;
+
+// Web screen-id for a syncable mode, or nullptr when the mode is not synced.
+// Takes int (not DisplayMode) so an auto-generated prototype can't reference
+// the DisplayMode enum ahead of its definition in the main tab.
+static const char* screenIdForMode(int m) {
+    for (size_t i = 0; i < kScreenMapLen; i++)
+        if ((int)kScreenMap[i].mode == m) return kScreenMap[i].id;
+    return nullptr;
+}
+
+// True while the device is in the interactive calibration flow — remote nav is
+// ignored in these modes so the web can't yank the user out of a calibration.
+static bool inCalibFlow() {
+    return currentMode == CAL_SETTINGS || currentMode == CAL_RUN     ||
+           currentMode == CAL_SAMPLING || currentMode == CAL_REVIEW  ||
+           currentMode == CAL_SUCCESS  || currentMode == CAL_CONFIRM;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // WEBSOCKET EVENT HANDLER  (runs on async task — enqueue only, no I²C/TFT)
 // ─────────────────────────────────────────────────────────────────────────────
 static void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
@@ -185,7 +234,11 @@ static void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                       client->id(), client->remoteIP().toString().c_str());
         Serial.flush();
         // Push the full device state to the newly connected client.
-        // buildFullStateJson touches only atomics and const globals — safe here.
+        // NOTE: buildFullStateJson() runs here on the AsyncTCP task (Core 0) and
+        // reads mutable calibration globals (distPoints/fovPoints/pointsCaptured/
+        // CTRLX...) that Core 1 may update mid-calibration. 32-bit reads are
+        // atomic on Xtensa so this won't crash, but a rare connect-time snapshot
+        // may be slightly inconsistent. Acceptable for a one-shot push.
         String out;
         buildFullStateJson(out);
         client->text(out);
@@ -214,7 +267,7 @@ static void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
         Serial.printf("[WS] data rx: %s\n", buf);
         Serial.flush();
 
-        StaticJsonDocument<256> doc;
+        StaticJsonDocument<512> doc;   // sized to the 512-byte payload cap above
         if (deserializeJson(doc, buf) != DeserializationError::Ok) return;
 
         for (JsonPair kv : doc.as<JsonObject>()) {
@@ -326,6 +379,24 @@ void wifiLoop() {
         Serial.printf("[CMD] dispatch %s = %s\n", cmd.key, cmd.val);
         Serial.flush();
         handleWifiCommand(cmd.key, cmd.val);
+    }
+
+    // ── Screen-navigation sync (device → web) ────────────────────────────────
+    // currentMode changes on every on-device menu touch. When it lands on a
+    // syncable mode, broadcast the matching web screen-id so connected
+    // dashboards follow. The "nav" command handler also updates lastSyncedMode,
+    // so a web-initiated change is absorbed here without echoing back. Runs
+    // before the no-clients return below so lastSyncedMode tracks continuously
+    // (textAll is a no-op with zero clients).
+    if (currentMode != lastSyncedMode) {
+        const char* navId = screenIdForMode(currentMode);
+        if (navId) {
+            String navMsg = "{\"screen\":\"";
+            navMsg += navId;
+            navMsg += "\"}";
+            wsServer.textAll(navMsg);
+        }
+        lastSyncedMode = currentMode;
     }
 
     // ── Telemetry push ───────────────────────────────────────────────────────
@@ -671,7 +742,7 @@ static void startFullServer() {
             char buf[513];
             memcpy(buf, data, len);
             buf[len] = '\0';
-            StaticJsonDocument<256> doc;
+            StaticJsonDocument<512> doc;   // sized to the 512-byte payload cap above
             if (deserializeJson(doc, buf) == DeserializationError::Ok) {
                 for (JsonPair kv : doc.as<JsonObject>()) {
                     WifiCmd cmd;
@@ -730,7 +801,7 @@ static void startFullServer() {
 //   obj, stepIndex, imgs, brightness, ledEnabled, ledDuty,
 //   sensorSleep, highRefl, dimMs, sleepMs, theme, tint,
 //   calWidth, demarcDist, calPoints, calStart, calCapture, calUndoPoint,
-//   resetAll, resetBonds, testAlert
+//   resetAll, resetBonds, testAlert, nav
 // ─────────────────────────────────────────────────────────────────────────────
 static void handleWifiCommand(const char* key, const char* val) {
     float fVal = atof(val);
@@ -758,40 +829,29 @@ static void handleWifiCommand(const char* key, const char* val) {
     } else if (strcmp(key, "secStep") == 0) {
         stackTimePerStep = constrain(fVal, 0.1f, 60.0f);
         settings.stackTimePerStep = stackTimePerStep;
-        preferences.begin("calib", false);
-        preferences.putBytes("settings", &settings, sizeof(CalibData));
-        preferences.end();
+        calibPrefsDirty = true; lastCalibEditMs = millis();   // deferred NVS save
         if (currentMode == STACK_TIME) refreshStackTimeValues(true);
 
     // ── Screen brightness (LITE_PIN, analogWrite 1-255) ──────────────────────
     } else if (strcmp(key, "brightness") == 0) {
         currentBrightness = constrain(iVal, 1, 255);
         analogWrite(LITE_PIN, currentBrightness);
-        settings.brightness = currentBrightness;
-        preferences.begin("calib", false);
-        preferences.putBytes("settings", &settings, sizeof(CalibData));
-        preferences.end();
+        calibPrefsDirty = true; lastCalibEditMs = millis();   // deferred NVS save
         if (currentMode == BRIGHTNESS_SETTINGS) refreshBrightnessSettingsValues(true);
         else if (currentMode == APP_SETTINGS)   drawOldBrightnessBar();
 
     // ── Trigger LED enabled flag ──────────────────────────────────────────────
     } else if (strcmp(key, "ledEnabled") == 0) {
         ledEnabled = (iVal != 0);
-        settings.ledEnabled = ledEnabled ? 1 : 0;
         analogWrite(TRIGGER_LED_PIN, ledEnabled ? (255 - currentLedDuty) : 255);
-        preferences.begin("calib", false);
-        preferences.putBytes("settings", &settings, sizeof(CalibData));
-        preferences.end();
+        calibPrefsDirty = true; lastCalibEditMs = millis();   // deferred NVS save
         if (currentMode == BRIGHTNESS_SETTINGS) drawBrightnessSettingsUI();  // toggle text+color changes
 
     // ── Trigger LED duty (0-127: max safe duty matches on-device slider) ──────
     } else if (strcmp(key, "ledDuty") == 0) {
         currentLedDuty = constrain(iVal, 0, 127);
-        settings.ledDuty = (uint8_t)currentLedDuty;
         analogWrite(TRIGGER_LED_PIN, ledEnabled ? (255 - currentLedDuty) : 255);
-        preferences.begin("calib", false);
-        preferences.putBytes("settings", &settings, sizeof(CalibData));
-        preferences.end();
+        calibPrefsDirty = true; lastCalibEditMs = millis();   // deferred NVS save
         if (currentMode == BRIGHTNESS_SETTINGS) refreshBrightnessSettingsValues(true);
 
     // ── Sensor sleep / wake ──────────────────────────────────────────────────
@@ -994,6 +1054,35 @@ static void handleWifiCommand(const char* key, const char* val) {
         } else {
             Serial.println("[WiFi] testAlert ignored — BLE not ready");
         }
+
+    // ── Remote menu navigation (web → device) ────────────────────────────────
+    //    val = web screen-id (e.g. "screen-settings"). Mirrors the web menu
+    //    onto the TFT. Ignored mid-calibration and for non-syncable ids.
+    //    A nav wakes the display like a physical touch; preSleepMode is set so
+    //    a later wakeScreen() restores the synced screen too.
+    } else if (strcmp(key, "nav") == 0) {
+        if (inCalibFlow()) return;                   // don't interrupt a calibration
+        for (size_t i = 0; i < kScreenMapLen; i++) {
+            if (strcmp(val, kScreenMap[i].id) != 0) continue;
+            DisplayMode m = kScreenMap[i].mode;
+            // Wake the TFT like a physical touch would: clear dim/sleep,
+            // restore the backlight, reset the idle timer.
+            bool wasOff = isScreenSleep || isScreenDim;
+            if (wasOff) {
+                isScreenSleep = false;
+                isScreenDim   = false;
+                analogWrite(LITE_PIN, currentBrightness);
+            }
+            lastActivityTime = millis();
+            if (m != currentMode || wasOff) {        // repaint on a real change or after wake
+                currentMode      = m;
+                preSleepMode     = m;
+                lastModeChangeMs = millis();         // arm the touch-transition guard
+                redrawCurrentScreen();
+            }
+            lastSyncedMode = currentMode;            // suppress the echo broadcast
+            break;
+        }
     }
 }
 
@@ -1060,8 +1149,11 @@ static void buildFullStateJson(String& out, bool includeCalGraph) {
     // (currently disabled while we work out heap budget).
     bool bleReady = (NimBLEDevice::getServer() != nullptr);
     doc["btConnected"]   = btConn ? 1 : 0;
-    doc["btMac"]         = bleReady ? NimBLEDevice::getAddress().toString().c_str()
-                                    : "00:00:00:00:00:00";
+    // NimBLEAddress::toString() returns a temporary std::string; .c_str() of it
+    // would dangle because ArduinoJson stores a const char* by reference (no
+    // copy). Assign a String so ArduinoJson copies the bytes immediately.
+    doc["btMac"]         = bleReady ? String(NimBLEDevice::getAddress().toString().c_str())
+                                    : String("00:00:00:00:00:00");
     doc["btBonds"]       = bleReady ? NimBLEDevice::getNumBonds() : 0;
     doc["btDevices"]     = btConn ? 1 : 0;
     doc["btRSSI"]        = btConn ? (int)btRSSI : 0;
@@ -1113,7 +1205,7 @@ static void buildFullStateJson(String& out, bool includeCalGraph) {
     serializeJson(doc, out);
 }
 
-// Fast telemetry — 10 Hz live sensor values + WiFi/BT signal levels
+// Fast telemetry — ~30 Hz live sensor values + WiFi/BT signal levels
 static void buildFastTelemJson(String& out) {
     uint32_t st  = sensorState.load(std::memory_order_acquire);
     uint32_t hst = sensorHealth.load(std::memory_order_acquire);
